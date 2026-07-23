@@ -5,6 +5,7 @@ import Darwin
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import SecondDisplayCore
+@preconcurrency import VideoToolbox
 import VirtualDisplayCore
 import XCTest
 
@@ -264,7 +265,7 @@ final class MediaPipelineTests: XCTestCase {
         let encoder = H264EncoderService()
         try await encoder.configure(EncoderSpec(width: 1280, height: 800, bitrate: 8_000_000))
         let frame = try makeFrame(width: 1280, height: 800, sequence: 0, generation: 1)
-        let optionalEncoded = try await encoder.encode(frame, forceKeyFrame: true)
+        let optionalEncoded = try await encodeWhenVideoToolboxIsAvailable(encoder, frame: frame)
         let encoded = try XCTUnwrap(optionalEncoded)
         XCTAssertTrue(encoded.isKeyFrame)
         let types = H264AnnexB.nalUnitTypes(in: encoded.payload)
@@ -298,7 +299,7 @@ final class MediaPipelineTests: XCTestCase {
             )
         )
         let frame = try makeFrame(width: 1280, height: 800, sequence: 0, generation: 2)
-        let optionalEncoded = try await encoder.encode(frame, forceKeyFrame: true)
+        let optionalEncoded = try await encodeWhenVideoToolboxIsAvailable(encoder, frame: frame)
         let encoded = try XCTUnwrap(optionalEncoded)
         XCTAssertTrue(encoded.isKeyFrame)
         let types = HEVCAnnexB.nalUnitTypes(in: encoded.payload)
@@ -597,6 +598,27 @@ final class MediaPipelineTests: XCTestCase {
             await capture.stop()
             await provider.destroy(handle)
             throw error
+        }
+    }
+
+    private func encodeWhenVideoToolboxIsAvailable(
+        _ encoder: H264EncoderService,
+        frame: CapturedFrame
+    ) async throws -> EncodedFrame? {
+        do {
+            return try await encoder.encode(frame, forceKeyFrame: true)
+        } catch let error as SessionError {
+            let unavailableStatuses = [
+                kVTCouldNotFindVideoEncoderErr,
+                kVTVideoEncoderNotAvailableNowErr,
+            ]
+            guard unavailableStatuses.contains(where: {
+                error.detail.contains("OSStatus \($0)")
+            }) else {
+                throw error
+            }
+            await encoder.invalidate()
+            throw XCTSkip("VideoToolbox encoder is unavailable in this execution environment")
         }
     }
 }
