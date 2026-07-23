@@ -1224,73 +1224,6 @@ struct Index {
               .padding({ top: 12, bottom: 12 })
             }
 
-            if (this.pendingPairingFingerprint.length === 64) {
-              Column({ space: 9 }) {
-                Row() {
-                  Column({ space: 2 }) {
-                    Text(`配对 ${this.pendingPairingName}`)
-                      .fontSize(14)
-                      .fontWeight(FontWeight.Medium)
-                      .fontColor(Color.White)
-                    Text(`证书指纹 ${this.pendingPairingFingerprint.slice(0, 12).toUpperCase()}…`)
-                      .fontSize(10)
-                      .fontColor('#AFC4DC')
-                  }
-                  .alignItems(HorizontalAlign.Start)
-                  .layoutWeight(1)
-                  Text(this.pairingQrVerified ? '二维码已核对' : '等待身份核对')
-                    .fontSize(10)
-                    .fontColor(this.pairingQrVerified ? '#7DE2A8' : '#FFC879')
-                }
-                .width('100%')
-                TextInput({ text: this.pairingCodeInput, placeholder: 'XXXX-XXXX-XXXX 校验码' })
-                  .fontSize(12)
-                  .fontColor(Color.White)
-                  .height(44)
-                  .width('100%')
-                  .backgroundColor('#32101E34')
-                  .enabled(!this.pairingSaveInProgress)
-                  .onChange((value: string) => this.pairingCodeInput = value)
-                Row({ space: 8 }) {
-                  Button(this.pairingScanInProgress ? '扫码中…' : '扫描二维码')
-                    .fontSize(11)
-                    .fontColor(Color.White)
-                    .height(44)
-                    .layoutWeight(1)
-                    .backgroundColor(this.pairingScanInProgress ? '#34485F' : '#2F74C9')
-                    .enabled(!this.pairingScanInProgress && !this.pairingSaveInProgress)
-                    .onClick(() => this.scanPairingQRCode())
-                  Button(this.pairingSaveInProgress ? '保存中…' : '确认信任')
-                    .fontSize(11)
-                    .fontColor(Color.White)
-                    .height(44)
-                    .layoutWeight(1)
-                    .backgroundColor(this.pairingQrVerified || this.pairingCodeInput.length > 0
-                      ? '#2F8C5A' : '#46505E')
-                    .enabled(!this.pairingSaveInProgress && !this.pairingScanInProgress
-                      && (this.pairingQrVerified || this.pairingCodeInput.length > 0))
-                    .onClick(() => this.confirmPairing())
-                  Button('取消')
-                    .fontSize(11)
-                    .fontColor(Color.White)
-                    .height(44)
-                    .layoutWeight(1)
-                    .backgroundColor('#3A4657')
-                    .enabled(!this.pairingSaveInProgress)
-                    .onClick(() => this.cancelPairing())
-                }
-                .width('100%')
-                Text(this.pairingStatus)
-                  .fontSize(10)
-                  .fontColor(this.pairingStatus.startsWith('NET_') ? '#FFB9B9' : '#AFC4DC')
-                  .width('100%')
-              }
-              .width('100%')
-              .padding(12)
-              .backgroundColor('#3811253F')
-              .borderRadius(12)
-            }
-
             Column({ space: 8 }) {
               Text('手动连接')
                 .fontSize(12)
@@ -1395,6 +1328,92 @@ struct Index {
         .backgroundColor('#F20A1528')
         .borderRadius(20)
         .border({ width: 1, color: '#304C6A91' })
+      }
+
+      if (!this.isStreamReady() && this.pendingPairingFingerprint.length === 64) {
+        // 配对属于必须完成的短流程，使用独立模态层，避免横屏低高度下操作按钮落到滚动区域外。
+        Column() {
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#A6000000')
+        .onTouch((_event?: TouchEvent) => {
+        })
+
+        Column({ space: 10 }) {
+          Row({ space: 10 }) {
+            Column({ space: 3 }) {
+              Text(`配对 ${this.pendingPairingName}`)
+                .fontSize(this.isPortraitWaitingLayout() ? 18 : 16)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(Color.White)
+              Text(`证书指纹 ${this.pendingPairingFingerprint.slice(0, 12).toUpperCase()}…`)
+                .fontSize(10)
+                .fontColor('#AFC4DC')
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Text(this.pairingQrVerified ? '二维码已核对' : '等待身份核对')
+              .fontSize(10)
+              .fontColor(this.pairingQrVerified ? '#7DE2A8' : '#FFC879')
+          }
+          .width('100%')
+
+          Text('扫描 Mac 上的二维码，或输入 Mac 显示的 12 位校验码。')
+            .fontSize(11)
+            .fontColor('#D7DFEA')
+            .width('100%')
+
+          TextInput({ text: this.pairingCodeInput, placeholder: 'XXXX-XXXX-XXXX 校验码' })
+            .fontSize(13)
+            .fontColor(Color.White)
+            .height(46)
+            .width('100%')
+            .backgroundColor('#40101E34')
+            .enabled(!this.pairingSaveInProgress)
+            .onChange((value: string) => this.pairingCodeInput = value)
+
+          Row({ space: 8 }) {
+            Button(this.pairingScanInProgress ? '扫码中…' : '扫描二维码')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .height(46)
+              .layoutWeight(1)
+              .backgroundColor(this.pairingScanInProgress ? '#34485F' : '#2F74C9')
+              .enabled(!this.pairingScanInProgress && !this.pairingSaveInProgress)
+              .onClick(() => this.scanPairingQRCode())
+            Button(this.pairingSaveInProgress ? '保存中…' : '确认信任')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .height(46)
+              .layoutWeight(1)
+              .backgroundColor(this.pairingQrVerified || this.pairingCodeInput.length > 0
+                ? '#2F8C5A' : '#46505E')
+              .enabled(!this.pairingSaveInProgress && !this.pairingScanInProgress
+                && (this.pairingQrVerified || this.pairingCodeInput.length > 0))
+              .onClick(() => this.confirmPairing())
+            Button('取消')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .height(46)
+              .layoutWeight(1)
+              .backgroundColor('#3A4657')
+              .enabled(!this.pairingSaveInProgress)
+              .onClick(() => this.cancelPairing())
+          }
+          .width('100%')
+
+          Text(this.pairingStatus)
+            .fontSize(10)
+            .fontColor(this.pairingStatus.startsWith('NET_') ? '#FFB9B9' : '#AFC4DC')
+            .width('100%')
+            .maxLines(2)
+        }
+        .width(this.isPortraitWaitingLayout() ? '88%' : '62%')
+        .padding(this.isPortraitWaitingLayout() ? 18 : 16)
+        .backgroundColor('#FC11253F')
+        .borderRadius(16)
+        .border({ width: 1, color: '#506E91B8' })
       }
 
       if (this.isStreamReady() && !this.overlayVisible) {
