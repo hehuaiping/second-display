@@ -10,7 +10,6 @@ interface ConnectCommand {
   family: number
   controlPort: number
   videoPort: number
-  caPem: string
   pinnedFingerprint: string
   displayWidth: number
   displayHeight: number
@@ -110,17 +109,6 @@ async function fingerprintBytes(bytes: Uint8Array): Promise<string> {
   }
 }
 
-async function fingerprintCertificatePEM(pem: string): Promise<string> {
-  const base64: string = pem
-    .replace('-----BEGIN CERTIFICATE-----', '')
-    .replace('-----END CERTIFICATE-----', '')
-    .replace(/\r/g, '')
-    .replace(/\n/g, '')
-    .replace(/ /g, '')
-  if (base64.length === 0) return ''
-  return fingerprintBytes(new util.Base64Helper().decodeSync(base64))
-}
-
 async function verifyPinnedCertificates(
   control: socket.TLSSocket,
   video: socket.TLSSocket,
@@ -128,10 +116,7 @@ async function verifyPinnedCertificates(
   activeGeneration: number
 ): Promise<void> {
   if (activeGeneration !== generation) throw new Error('stale connection generation')
-  const selectedFingerprint: string = normalizeFingerprint(command.pinnedFingerprint)
-  const legacyFingerprint: string = await fingerprintCertificatePEM(command.caPem)
-  const pairedFingerprint: string = selectedFingerprint.length === 64
-    ? selectedFingerprint : legacyFingerprint
+  const pairedFingerprint: string = normalizeFingerprint(command.pinnedFingerprint)
   if (pairedFingerprint.length !== 64) throw new Error('paired certificate fingerprint is invalid')
   let certificates: socket.X509CertRawData[]
   try {
@@ -460,8 +445,8 @@ async function connect(command: ConnectCommand): Promise<void> {
   generation += 1
   const activeGeneration: number = generation
   await closeSockets(activeGeneration)
-  if (command.caPem.length === 0) {
-    postStatus('NET_PROTOCOL_MISMATCH: paired CA certificate is unavailable')
+  if (normalizeFingerprint(command.pinnedFingerprint).length !== 64) {
+    postStatus('NET_PROTOCOL_MISMATCH: paired certificate fingerprint is unavailable')
     return
   }
   if (command.family !== 1 && command.family !== 2) {
@@ -486,7 +471,6 @@ async function connect(command: ConnectCommand): Promise<void> {
       video.bind({ address: localAddress, family: command.family, port: 0 })
     ])
     const secureOptions: socket.TLSSecureOptions = {
-      ca: command.caPem,
       protocols: socket.Protocol.TLSv13
     }
     await Promise.all([

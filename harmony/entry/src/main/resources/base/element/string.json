@@ -2,15 +2,11 @@
   "string": [
     {
       "name": "module_desc",
-      "value": "Second Display receiver"
+      "value": "将 HarmonyOS 设备用作 Mac 的低延迟局域网扩展屏幕。"
     },
     {
       "name": "ability_desc",
-      "value": "Second Display receiver main ability"
-    },
-    {
-      "name": "foundation_ready",
-      "value": "P0 engineering foundation is ready."
+      "value": "发现、配对并连接局域网中的 Second Display Mac 服务。"
     }
   ]
 }

@@ -19,30 +19,23 @@ if(NOT CMAKE_SYSTEM_NAME STREQUAL "OHOS")
 endif()
 
 if(CMAKE_SYSTEM_NAME STREQUAL "OHOS")
-    file(READ
-        "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../shared/test-vectors/media/h264_1920x1200_60.h264"
-        H264_TEST_VECTOR_HEX HEX)
-    string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," H264_TEST_VECTOR_BYTES
-        "${H264_TEST_VECTOR_HEX}")
-    file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
-    configure_file(
-        decoder/TestVectorData.hpp.in
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/TestVectorData.hpp"
-        @ONLY)
-    set(POC_CA_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../.build/p3-poc-tls/cert.pem")
-    set(POC_CA_CONTENT "")
-    if(EXISTS "${POC_CA_FILE}")
-        file(READ "${POC_CA_FILE}" POC_CA_CONTENT)
-    endif()
-    configure_file(
-        transport/PocCA.hpp.in
-        "${CMAKE_CURRENT_BINARY_DIR}/generated/PocCA.hpp"
-        @ONLY)
-
     add_library(entry SHARED
         napi_init.cpp
         decoder/H264SurfaceDecoder.cpp
     )
+    if(CMAKE_BUILD_TYPE STREQUAL "Debug")
+        file(READ
+            "${CMAKE_CURRENT_SOURCE_DIR}/../../../../../shared/test-vectors/media/h264_1920x1200_60.h264"
+            H264_TEST_VECTOR_HEX HEX)
+        string(REGEX REPLACE "([0-9a-fA-F][0-9a-fA-F])" "0x\\1," H264_TEST_VECTOR_BYTES
+            "${H264_TEST_VECTOR_HEX}")
+        file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+        configure_file(
+            decoder/TestVectorData.hpp.in
+            "${CMAKE_CURRENT_BINARY_DIR}/generated/TestVectorData.hpp"
+            @ONLY)
+        target_compile_definitions(entry PRIVATE SECOND_DISPLAY_ENABLE_DIAGNOSTICS=1)
+    endif()
     target_include_directories(entry PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
     target_link_libraries(entry PRIVATE
         second_display_protocol

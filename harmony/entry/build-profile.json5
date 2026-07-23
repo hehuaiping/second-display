@@ -11,8 +11,7 @@
         "ruleOptions": {
           "enable": false,
           "files": ["./obfuscation-rules.txt"]
-        },
-        "consumerFiles": ["./consumer-rules.txt"]
+        }
       }
     }
   },
@@ -22,10 +21,10 @@
       "arkOptions": {
         "obfuscation": {
           "ruleOptions": {
-            "enable": true,
+            // 首个发行版暂不混淆：Worker 路径与 Native API 尚未建立完整保留规则和发行回归基线。
+            "enable": false,
             "files": ["./obfuscation-rules.txt"]
-          },
-          "consumerFiles": ["./consumer-rules.txt"]
+          }
         }
       }
     }
@@ -39,4 +38,3 @@
     }
   ]
 }
-

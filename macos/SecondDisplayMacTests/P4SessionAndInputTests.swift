@@ -225,6 +225,8 @@ final class P4SessionAndInputTests: XCTestCase {
         XCTAssertEqual(authorization.requestCount, 0)
         XCTAssertTrue(controller.requestFromUserAction())
         XCTAssertEqual(authorization.requestCount, 1)
+        XCTAssertFalse(controller.requestFromUserAction())
+        XCTAssertEqual(authorization.requestCount, 1)
     }
 }
 

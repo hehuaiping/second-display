@@ -22,8 +22,6 @@ interface ReceiverNative {
   getDecoderStatus(): DecoderStatus;
   restartDecoder(): DecoderStatus;
   stopDecoder(): DecoderStatus;
-  startDecoderSoak(durationSeconds: number): DecoderStatus;
-  stopDecoderSoak(): DecoderStatus;
   beginVideoSession(
     sessionId: string,
     width: number,
@@ -33,7 +31,6 @@ interface ReceiverNative {
   ): DecoderStatus;
   feedVideoBytes(sessionId: string, bytes: Uint8Array): DecoderStatus;
   finishVideoSession(sessionId: string): DecoderStatus;
-  getPocCACertificate(): string;
   getH264DecoderMaxFps(width: number, height: number): number;
   getHEVCDecoderMaxFps(width: number, height: number): number;
 }

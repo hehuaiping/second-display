@@ -4,7 +4,7 @@
   "description": "Second Display receiver entry module",
   "main": "",
   "types": "./src/main/cpp/types/libentry/index.d.ts",
-  "author": "",
+  "author": "何怀平",
   "license": "UNLICENSED",
   "dependencies": {}
 }

@@ -21,7 +21,8 @@ export interface PairingPayload {
 
 const STORE_NAME: string = 'second_display_pairing'
 const TRUST_DOCUMENT_KEY: string = 'trusted_macs'
-const INITIALIZED_KEY: string = 'initialized'
+const TRUST_SCHEMA_VERSION_KEY: string = 'schema_version'
+const TRUST_SCHEMA_VERSION: number = 2
 const MAX_TRUSTED_MACS: number = 32
 
 export function normalizePairingFingerprint(value: string): string {
@@ -58,29 +59,20 @@ export function parsePairingPayload(value: string): PairingPayload | undefined {
 
 /// 仅保存公开证书指纹，不保存私钥或会话密钥；应用沙箱内 Preferences 足以承载该信任清单。
 export class PairingTrustStore {
-  async load(
-    context: common.UIAbilityContext,
-    bootstrapFingerprint: string,
-    bootstrapName: string
-  ): Promise<TrustedMac[]> {
+  async load(context: common.UIAbilityContext): Promise<TrustedMac[]> {
     try {
       const store: preferences.Preferences = await preferences.getPreferences(
         context,
         { name: STORE_NAME }
       )
-      const initializedValue: preferences.ValueType = await store.get(INITIALIZED_KEY, false)
-      const initialized: boolean = typeof initializedValue === 'boolean' && initializedValue
-      if (!initialized) {
-        const fingerprint: string = normalizePairingFingerprint(bootstrapFingerprint)
-        const devices: TrustedMac[] = fingerprint.length === 64 ? [{
-          fingerprint: fingerprint,
-          name: bootstrapName,
-          pairedAtMs: Date.now()
-        }] : []
-        await this.write(store, devices)
-        await store.put(INITIALIZED_KEY, true)
+      const schemaValue: preferences.ValueType = await store.get(TRUST_SCHEMA_VERSION_KEY, 0)
+      const schemaVersion: number = typeof schemaValue === 'number' ? schemaValue : 0
+      if (schemaVersion !== TRUST_SCHEMA_VERSION) {
+        // 版本 1 曾自动信任内置 POC 证书。发行版升级时必须撤销该信任，要求用户重新配对。
+        await this.write(store, [])
+        await store.put(TRUST_SCHEMA_VERSION_KEY, TRUST_SCHEMA_VERSION)
         await store.flush()
-        return devices
+        return []
       }
       const encodedValue: preferences.ValueType = await store.get(TRUST_DOCUMENT_KEY, '')
       if (typeof encodedValue !== 'string') return []
@@ -112,7 +104,7 @@ export class PairingTrustStore {
         { name: STORE_NAME }
       )
       await this.write(store, next)
-      await store.put(INITIALIZED_KEY, true)
+      await store.put(TRUST_SCHEMA_VERSION_KEY, TRUST_SCHEMA_VERSION)
       await store.flush()
       return next
     } catch (error) {
@@ -135,7 +127,7 @@ export class PairingTrustStore {
         { name: STORE_NAME }
       )
       await this.write(store, next)
-      await store.put(INITIALIZED_KEY, true)
+      await store.put(TRUST_SCHEMA_VERSION_KEY, TRUST_SCHEMA_VERSION)
       await store.flush()
       return next
     } catch (error) {
@@ -145,7 +137,7 @@ export class PairingTrustStore {
 
   private async write(store: preferences.Preferences, devices: TrustedMac[]): Promise<void> {
     try {
-      const document: StoredTrustDocument = { version: 1, devices: devices }
+      const document: StoredTrustDocument = { version: TRUST_SCHEMA_VERSION, devices: devices }
       await store.put(TRUST_DOCUMENT_KEY, JSON.stringify(document))
     } catch (error) {
       throw new Error('NET_PROTOCOL_MISMATCH: unable to encode pairing trust')
@@ -156,7 +148,7 @@ export class PairingTrustStore {
     if (value.length === 0 || value.length > 64 * 1024) return []
     try {
       const document: StoredTrustDocument = JSON.parse(value) as StoredTrustDocument
-      if (document.version !== 1 || !Array.isArray(document.devices)) return []
+      if (document.version !== TRUST_SCHEMA_VERSION || !Array.isArray(document.devices)) return []
       const result: TrustedMac[] = []
       for (const candidate of document.devices.slice(0, MAX_TRUSTED_MACS)) {
         const fingerprint: string = normalizePairingFingerprint(candidate.fingerprint)

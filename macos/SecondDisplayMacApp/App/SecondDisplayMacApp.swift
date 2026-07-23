@@ -61,7 +61,14 @@ private struct HostServiceView: View {
                     Task { await model.startService() }
                 }
                 .keyboardShortcut(.defaultAction)
-                .disabled(model.isServiceActive || !model.pairingReady)
+                .disabled(
+                    model.isServiceActive || !model.pairingReady || !model.screenCaptureAllowed
+                )
+                .help(
+                    model.screenCaptureAllowed
+                        ? "Start the Second Display service"
+                        : "Grant Screen Recording permission before starting the service"
+                )
                 Button("Stop Service") {
                     Task { await model.stopService() }
                 }
@@ -130,8 +137,8 @@ private struct HostServiceView: View {
                         )
                         .foregroundStyle(model.screenCaptureAllowed ? Color.green : Color.orange)
                         Spacer()
-                        Button("Open System Settings") {
-                            model.openScreenRecordingSettings()
+                        Button(model.screenCapturePermissionActionLabel) {
+                            model.requestScreenCapturePermission()
                         }
                         .disabled(model.screenCaptureAllowed)
                     }
@@ -144,11 +151,18 @@ private struct HostServiceView: View {
                         )
                         .foregroundStyle(model.accessibilityAllowed ? Color.green : Color.orange)
                         Spacer()
-                        Button("Enable Touch Control") {
+                        Button(model.accessibilityPermissionActionLabel) {
                             model.requestAccessibilityPermission()
                         }
                         .disabled(model.accessibilityAllowed)
                     }
+                    Text(
+                        "Permission prompts appear only after you click a request button. "
+                            + "If access is declined, the button opens System Settings instead of asking again."
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
                 .padding(.vertical, 4)
             }
@@ -244,6 +258,8 @@ private final class HostServiceModel: ObservableObject {
     @Published private(set) var pairingReady = false
     @Published private(set) var screenCaptureAllowed = false
     @Published private(set) var accessibilityAllowed = false
+    @Published private(set) var screenCaptureRequestIssued = false
+    @Published private(set) var accessibilityRequestIssued = false
     @Published private(set) var certificateFingerprint = "Unavailable"
     @Published private(set) var pairingLocation = ""
     @Published private(set) var pairingVerificationCode = "Unavailable"
@@ -263,8 +279,16 @@ private final class HostServiceModel: ObservableObject {
     private var latestGeneration: UInt64 = 0
     private var eventHistory: [P3HostEvent] = []
     private var latestSelfTest: P3DiagnosticSelfTestResult?
+    private static let screenCapturePromptKey = "SecondDisplay.ScreenCapturePromptIssued"
+    private static let accessibilityPromptKey = "SecondDisplay.AccessibilityPromptIssued"
 
     private init() {
+        screenCaptureRequestIssued = UserDefaults.standard.bool(
+            forKey: Self.screenCapturePromptKey
+        )
+        accessibilityRequestIssued = UserDefaults.standard.bool(
+            forKey: Self.accessibilityPromptKey
+        )
         localIPAddress = LocalNetworkInfo.preferredIPv4Address() ?? "Unavailable"
         refreshPermissions()
         reloadPairing()
@@ -308,15 +332,24 @@ private final class HostServiceModel: ObservableObject {
         }
     }
 
+    var screenCapturePermissionActionLabel: String {
+        screenCaptureRequestIssued ? "Open System Settings" : "Request Screen Recording"
+    }
+
+    var accessibilityPermissionActionLabel: String {
+        accessibilityRequestIssued ? "Open System Settings" : "Enable Touch Control"
+    }
+
     func startService() async {
         guard !isServiceActive else { return }
         refreshPermissions()
-        guard screenCapturePermission.requestFromUserAction() else {
+        guard screenCaptureAllowed else {
             phase = .failed
-            statusMessage = "CAP_PERMISSION_DENIED: Screen Recording permission is required"
+            recentErrorCode = SessionErrorCode.capPermissionDenied.rawValue
+            statusMessage =
+                "CAP_PERMISSION_DENIED: grant Screen Recording in Permissions before starting"
             return
         }
-        screenCaptureAllowed = true
         reloadPairing()
         guard let credentials else {
             phase = .failed
@@ -352,24 +385,79 @@ private final class HostServiceModel: ObservableObject {
         accessibilityAllowed = AXIsProcessTrusted()
     }
 
+    func requestScreenCapturePermission() {
+        refreshPermissions()
+        guard !screenCaptureAllowed else { return }
+        guard !screenCaptureRequestIssued else {
+            openScreenRecordingSettings()
+            return
+        }
+        screenCaptureRequestIssued = true
+        UserDefaults.standard.set(true, forKey: Self.screenCapturePromptKey)
+        _ = screenCapturePermission.requestFromUserAction()
+        refreshPermissions()
+        if screenCaptureAllowed {
+            statusMessage = "Screen Recording permission granted"
+        } else {
+            recentErrorCode = SessionErrorCode.capPermissionDenied.rawValue
+            statusMessage =
+                "CAP_PERMISSION_DENIED: enable Screen Recording in System Settings, then return"
+        }
+    }
+
     func requestAccessibilityPermission() {
+        refreshPermissions()
+        guard !accessibilityAllowed else { return }
+        guard !accessibilityRequestIssued else {
+            openAccessibilitySettings()
+            return
+        }
+        accessibilityRequestIssued = true
+        UserDefaults.standard.set(true, forKey: Self.accessibilityPromptKey)
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
-        accessibilityAllowed = AXIsProcessTrusted()
+        refreshPermissions()
+        if !accessibilityAllowed {
+            recentErrorCode = SessionErrorCode.inputPermissionDenied.rawValue
+            statusMessage =
+                "INPUT_PERMISSION_DENIED: enable Accessibility in System Settings for touch control"
+        }
     }
 
     func openScreenRecordingSettings() {
+        openPrivacySettings(
+            anchor: "Privacy_ScreenCapture",
+            errorCode: .capPermissionDenied,
+            failureDetail: "unable to open Screen Recording settings"
+        )
+    }
+
+    private func openAccessibilitySettings() {
+        openPrivacySettings(
+            anchor: "Privacy_Accessibility",
+            errorCode: .inputPermissionDenied,
+            failureDetail: "unable to open Accessibility settings"
+        )
+    }
+
+    private func openPrivacySettings(
+        anchor: String,
+        errorCode: SessionErrorCode,
+        failureDetail: String
+    ) {
         guard
             let url = URL(
-                string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"
+                string: "x-apple.systempreferences:com.apple.preference.security?\(anchor)"
             )
         else {
             phase = .failed
-            statusMessage = "CAP_PERMISSION_DENIED: unable to open Screen Recording settings"
+            recentErrorCode = errorCode.rawValue
+            statusMessage = "\(errorCode.rawValue): \(failureDetail)"
             return
         }
         if !NSWorkspace.shared.open(url) {
             phase = .failed
-            statusMessage = "CAP_PERMISSION_DENIED: unable to open Screen Recording settings"
+            recentErrorCode = errorCode.rawValue
+            statusMessage = "\(errorCode.rawValue): \(failureDetail)"
         }
     }
 

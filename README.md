@@ -141,6 +141,8 @@ hvigorw assembleHap --mode module \
 - 控制消息、视频帧、队列和分片均有硬上限。
 - 日志不记录视频帧、键盘文本、私钥或完整设备标识。
 - 所有失败返回项目错误码，不使用 `fatalError` 终止进程。
+- HarmonyOS 版隐私说明见
+  [《Second Display 隐私政策》](docs/HarmonyOS_Privacy_Policy_ZH.md)。
 
 ## 进一步阅读
 

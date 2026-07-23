@@ -1,6 +1,66 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
-  <rect width="128" height="128" rx="28" fill="#315CFF"/>
-  <rect x="22" y="30" width="84" height="58" rx="8" fill="none" stroke="#FFFFFF" stroke-width="8"/>
-  <path d="M48 104h32M64 88v16" stroke="#FFFFFF" stroke-width="8" stroke-linecap="round"/>
-</svg>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg
+  xmlns="http://www.w3.org/2000/svg"
+  width="1024"
+  height="1024"
+  viewBox="0 0 1024 1024"
+  role="img"
+  aria-labelledby="title description">
+  <title id="title">Second Display 应用图标</title>
+  <desc id="description">桌面显示器通过青色扩展箭头连接到第二块平板屏幕。</desc>
 
+  <defs>
+    <linearGradient id="background" x1="70" y1="910" x2="980" y2="90" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#06164E"/>
+      <stop offset="0.48" stop-color="#0730A8"/>
+      <stop offset="1" stop-color="#0757FF"/>
+    </linearGradient>
+    <radialGradient id="softGlow" cx="0" cy="0" r="1"
+      gradientTransform="translate(625 470) rotate(42) scale(570)">
+      <stop offset="0" stop-color="#0C6BFF" stop-opacity="0.32"/>
+      <stop offset="1" stop-color="#0C6BFF" stop-opacity="0"/>
+    </radialGradient>
+    <linearGradient id="cyan" x1="250" y1="428" x2="830" y2="700" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#00B8F4"/>
+      <stop offset="0.52" stop-color="#18E3F1"/>
+      <stop offset="1" stop-color="#20F2E4"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1024" height="1024" fill="url(#background)"/>
+  <rect width="1024" height="1024" fill="url(#softGlow)"/>
+  <g stroke-linecap="round" stroke-linejoin="round">
+    <path
+      d="M190 620V292C190 258 218 230 252 230H690C724 230 752 258 752 292V502"
+      fill="none"
+      stroke="#FFFFFF"
+      stroke-width="38"/>
+    <path
+      d="M190 620C190 654 218 682 252 682H510"
+      fill="none"
+      stroke="#FFFFFF"
+      stroke-width="38"/>
+    <path d="M414 684L400 746" fill="none" stroke="#FFFFFF" stroke-width="34"/>
+    <path d="M342 750H510" fill="none" stroke="#FFFFFF" stroke-width="34"/>
+    <rect
+      x="548"
+      y="532"
+      width="306"
+      height="214"
+      rx="34"
+      fill="#082B91"
+      fill-opacity="0.62"
+      stroke="url(#cyan)"
+      stroke-width="34"/>
+    <path
+      d="M258 436C372 436 430 441 482 500C523 546 527 610 604 638C648 654 687 654 730 654"
+      fill="none"
+      stroke="url(#cyan)"
+      stroke-width="48"/>
+    <path
+      d="M716 610L786 654L716 698Z"
+      fill="url(#cyan)"
+      stroke="url(#cyan)"
+      stroke-width="8"/>
+  </g>
+</svg>
