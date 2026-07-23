@@ -1,5 +1,4 @@
 import { common } from '@kit.AbilityKit'
-import { cryptoFramework } from '@kit.CryptoArchitectureKit'
 import { mdns } from '@kit.NetworkKit'
 import { util } from '@kit.ArkTS'
 
@@ -29,31 +28,6 @@ function normalizeFingerprint(value: string): string {
   return normalized
 }
 
-function certificateDERFromPEM(pem: string): Uint8Array {
-  const base64: string = pem
-    .replace('-----BEGIN CERTIFICATE-----', '')
-    .replace('-----END CERTIFICATE-----', '')
-    .replace(/\r/g, '')
-    .replace(/\n/g, '')
-    .replace(/ /g, '')
-  if (base64.length === 0) return new Uint8Array(0)
-  return new util.Base64Helper().decodeSync(base64)
-}
-
-export function fingerprintCertificatePEM(pem: string): string {
-  try {
-    const der: Uint8Array = certificateDERFromPEM(pem)
-    if (der.length === 0) return ''
-    const digest = cryptoFramework.createMd('SHA256')
-    digest.updateSync({ data: der })
-    return Array.from(digest.digestSync().data)
-      .map((byte: number) => byte.toString(16).padStart(2, '0'))
-      .join('')
-  } catch (error) {
-    return ''
-  }
-}
-
 /// 管理一次可取消的 mDNS 搜索；所有异步解析结果都必须匹配创建它的 generation。
 export class ServiceDiscoveryController {
   private generation: number = 0
@@ -67,6 +41,10 @@ export class ServiceDiscoveryController {
   private onLost: LocalServiceCallback | undefined = undefined
   private onStarted: DiscoveryEventCallback | undefined = undefined
   private onStopped: DiscoveryEventCallback | undefined = undefined
+
+  isActive(): boolean {
+    return this.discovery !== undefined
+  }
 
   start(
     context: common.UIAbilityContext,

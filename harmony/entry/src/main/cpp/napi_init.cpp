@@ -1,7 +1,8 @@
 #include "decoder/H264SurfaceDecoder.hpp"
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
 #include "TestVectorData.hpp"
+#endif
 #include "transport/FrameParser.hpp"
-#include "PocCA.hpp"
 
 #include <ace/xcomponent/native_interface_xcomponent.h>
 #include <multimedia/player_framework/native_avcapability.h>
@@ -216,6 +217,7 @@ public:
 
     void StartTestPlayer(std::uint32_t durationSeconds)
     {
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
         StopTestPlayer();
         if (durationSeconds == 0 || durationSeconds > 24U * 60U * 60U) {
             std::lock_guard lock(stateMutex_);
@@ -238,15 +240,20 @@ public:
         testThread_ = std::thread([this, durationSeconds, generation] {
             PlayTestVector(durationSeconds, generation);
         });
+#else
+        (void)durationSeconds;
+#endif
     }
 
     void StopTestPlayer()
     {
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
         testStop_.store(true);
         testCondition_.notify_all();
         if (testThread_.joinable() && testThread_.get_id() != std::this_thread::get_id()) {
             testThread_.join();
         }
+#endif
     }
 
     void RecordRegistrationFailure()
@@ -313,6 +320,7 @@ private:
         if (decoder_.Generation() == generation_) statusCode_ = std::move(error);
     }
 
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
     static std::vector<std::vector<std::uint8_t>> TestAccessUnits()
     {
         using second_display::decoder::kH264TestVector;
@@ -376,6 +384,7 @@ private:
         std::lock_guard lock(stateMutex_);
         if (generation == generation_ && !testStop_.load()) statusCode_ = "SOAK_COMPLETE";
     }
+#endif
 
     mutable std::mutex stateMutex_;
     std::mutex operationMutex_;
@@ -383,10 +392,12 @@ private:
     OHNativeWindow* window_ = nullptr;
     std::uint64_t generation_ = 0;
     std::string statusCode_ = "WAITING_SURFACE";
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
     std::atomic<bool> testStop_ = true;
     std::mutex testMutex_;
     std::condition_variable testCondition_;
     std::thread testThread_;
+#endif
     std::uint64_t testFrames_ = 0;
     std::uint64_t droppedFrames_ = 0;
     std::uint64_t networkFrames_ = 0;
@@ -528,6 +539,7 @@ napi_value StopDecoder(napi_env env, napi_callback_info)
     return StatusObject(env);
 }
 
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
 napi_value StartDecoderSoak(napi_env env, napi_callback_info info)
 {
     std::size_t argumentCount = 1;
@@ -549,14 +561,7 @@ napi_value StopDecoderSoak(napi_env env, napi_callback_info)
     Runtime().StopTestPlayer();
     return StatusObject(env);
 }
-
-napi_value GetPocCACertificate(napi_env env, napi_callback_info)
-{
-    napi_value certificate = nullptr;
-    const auto value = second_display::transport::kPocCACertificate;
-    if (napi_create_string_utf8(env, value.data(), value.size(), &certificate) != napi_ok) return nullptr;
-    return certificate;
-}
+#endif
 
 napi_value GetDecoderMaxFps(napi_env env, napi_callback_info info, const char* mime)
 {
@@ -711,12 +716,13 @@ napi_value Initialize(napi_env env, napi_value exports)
         {"getDecoderStatus", nullptr, GetDecoderStatus, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"restartDecoder", nullptr, RestartDecoder, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDecoder", nullptr, StopDecoder, nullptr, nullptr, nullptr, napi_default, nullptr},
+#if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
         {"startDecoderSoak", nullptr, StartDecoderSoak, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"stopDecoderSoak", nullptr, StopDecoderSoak, nullptr, nullptr, nullptr, napi_default, nullptr},
+#endif
         {"beginVideoSession", nullptr, BeginVideoSession, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"feedVideoBytes", nullptr, FeedVideoBytes, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"finishVideoSession", nullptr, FinishVideoSession, nullptr, nullptr, nullptr, napi_default, nullptr},
-        {"getPocCACertificate", nullptr, GetPocCACertificate, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getH264DecoderMaxFps", nullptr, GetH264DecoderMaxFps, nullptr, nullptr, nullptr, napi_default, nullptr},
         {"getHEVCDecoderMaxFps", nullptr, GetHEVCDecoderMaxFps, nullptr, nullptr, nullptr, napi_default, nullptr},
     };

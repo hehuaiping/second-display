@@ -23,3 +23,4 @@ local.properties
 *.log
 .DS_Store
 harmony/build-profile.json5
+/huawei_app_keys/

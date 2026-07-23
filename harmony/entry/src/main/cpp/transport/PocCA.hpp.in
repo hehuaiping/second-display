@@ -1,9 +1,0 @@
-#pragma once
-
-#include <string_view>
-
-namespace second_display::transport {
-
-inline constexpr std::string_view kPocCACertificate = R"SDCA(@POC_CA_CONTENT@)SDCA";
-
-} // namespace second_display::transport
