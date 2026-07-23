@@ -76,6 +76,8 @@ public struct P3HostConfiguration: Sendable {
     public let durationSeconds: UInt64?
     public let showsAnimatedTestPattern: Bool
     public let maximumFramesPerSecond: Int
+    public let certificateFingerprint: String?
+    public let bonjourServiceName: String
 
     public init(
         identityData: Data,
@@ -84,7 +86,9 @@ public struct P3HostConfiguration: Sendable {
         videoPort: UInt16 = 52_341,
         durationSeconds: UInt64? = nil,
         showsAnimatedTestPattern: Bool = false,
-        maximumFramesPerSecond: Int = 60
+        maximumFramesPerSecond: Int = 60,
+        certificateFingerprint: String? = nil,
+        bonjourServiceName: String = Host.current().localizedName ?? "Second Display Mac"
     ) {
         self.identityData = identityData
         self.identityPassword = identityPassword
@@ -93,6 +97,9 @@ public struct P3HostConfiguration: Sendable {
         self.durationSeconds = durationSeconds.map { min(max($0, 1), 24 * 60 * 60) }
         self.showsAnimatedTestPattern = showsAnimatedTestPattern
         self.maximumFramesPerSecond = [120, 90, 60].first { $0 <= maximumFramesPerSecond } ?? 60
+        self.certificateFingerprint = certificateFingerprint
+        let trimmedName = bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.bonjourServiceName = trimmedName.isEmpty ? "Second Display Mac" : trimmedName
     }
 }
 

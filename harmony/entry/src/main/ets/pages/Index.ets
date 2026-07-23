@@ -2,6 +2,20 @@ import receiverNative, { DecoderStatus } from 'libentry.so'
 import { ErrorEvent, MessageEvents, util, worker } from '@kit.ArkTS'
 import { display } from '@kit.ArkUI'
 import { connection } from '@kit.NetworkKit'
+import { common } from '@kit.AbilityKit'
+import { scanBarcode, scanCore } from '@kit.ScanKit'
+import {
+  DiscoveredSecondDisplayService,
+  fingerprintCertificatePEM,
+  ServiceDiscoveryController
+} from '../services/ServiceDiscoveryController'
+import { NetworkChangeMonitor } from '../services/NetworkChangeMonitor'
+import {
+  PairingTrustStore,
+  pairingVerificationCode,
+  parsePairingPayload,
+  TrustedMac
+} from '../services/PairingTrustStore'
 
 PersistentStorage.persistProp('secondDisplayDeviceId', '')
 
@@ -13,9 +27,11 @@ interface ReceiverWorkerStatus {
 interface ReceiverConnectCommand {
   type: string
   host: string
+  family: number
   controlPort: number
   videoPort: number
   caPem: string
+  pinnedFingerprint: string
   displayWidth: number
   displayHeight: number
   maxFps: number
@@ -51,6 +67,16 @@ struct Index {
   @State private overlayVisible: boolean = true
   @State private recognizedGestureCount: number = 0
   @State private lastGestureCode: string = 'NONE'
+  @State private discoveredServices: DiscoveredSecondDisplayService[] = []
+  @State private discoveryCode: string = 'DISCOVERY_IDLE'
+  @State private manualHost: string = '192.168.43.9'
+  @State private manualTrustedFingerprint: string = ''
+  @State private trustedMacs: TrustedMac[] = []
+  @State private pendingPairingFingerprint: string = ''
+  @State private pendingPairingName: string = ''
+  @State private pairingCodeInput: string = ''
+  @State private pairingQrVerified: boolean = false
+  @State private pairingStatus: string = ''
   private statusTimer: number = -1
   private previousFrameCount: number = 0
   private previousFrameSampleAtMs: number = 0
@@ -71,12 +97,28 @@ struct Index {
   private supportedCodecs: string[] = ['h264']
   private previousFeedbackAtMs: number = 0
   private orientationRecoveryPending: boolean = false
+  private discoveryController: ServiceDiscoveryController = new ServiceDiscoveryController()
+  private networkChangeMonitor: NetworkChangeMonitor = new NetworkChangeMonitor()
+  private trustStore: PairingTrustStore = new PairingTrustStore()
+  private selectedTarget: DiscoveredSecondDisplayService | undefined = undefined
+  private pairedFingerprint: string = ''
+  private trustGeneration: number = 0
+  private pairingOperationGeneration: number = 0
+  private rediscoveryFingerprint: string = ''
 
   aboutToAppear(): void {
     if (this.receiverDeviceId.length === 0) {
       this.receiverDeviceId = util.generateRandomUUID()
     }
     this.refreshSystemDisplayResolution()
+    this.pairedFingerprint = fingerprintCertificatePEM(receiverNative.getPocCACertificate())
+    this.loadTrustedMacs()
+    this.networkChangeMonitor.start((): void => {
+      if (!this.isStreamReady() && this.connectionCode !== 'CONNECTING'
+        && this.connectionCode !== 'TLS_CONNECTED' && this.connectionCode !== 'RECONNECTING') {
+        this.startDiscovery()
+      }
+    })
     this.refreshStatus()
     this.statusTimer = setInterval(() => this.refreshStatus(), 500)
   }
@@ -88,6 +130,10 @@ struct Index {
     }
     this.cancelActiveTouch()
     this.cancelFastReconnect()
+    this.networkChangeMonitor.stop()
+    this.discoveryController.stop()
+    this.trustGeneration += 1
+    this.pairingOperationGeneration += 1
     receiverNative.stopDecoder()
     this.workerGeneration += 1
     if (this.receiverWorker !== undefined) {
@@ -100,12 +146,248 @@ struct Index {
     }
   }
 
-  private connectReceiver(isRecovery: boolean = false): void {
+  private loadTrustedMacs(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.discoveryCode = 'NET_PROTOCOL_MISMATCH: application context is unavailable'
+      return
+    }
+    this.trustGeneration += 1
+    const activeGeneration: number = this.trustGeneration
+    this.trustStore.load(context, this.pairedFingerprint, 'Second Display Mac').then(
+      (devices: TrustedMac[]): void => {
+        if (activeGeneration !== this.trustGeneration) return
+        this.trustedMacs = devices
+        this.synchronizeManualTrustSelection()
+        this.startDiscovery()
+      }
+    ).catch((): void => {
+      if (activeGeneration !== this.trustGeneration) return
+      // 存储异常时保留本次运行的内置证书兼容路径，但不伪装成已持久化成功。
+      this.trustedMacs = this.pairedFingerprint.length === 64 ? [{
+        fingerprint: this.pairedFingerprint,
+        name: 'Second Display Mac',
+        pairedAtMs: Date.now()
+      }] : []
+      this.synchronizeManualTrustSelection()
+      this.discoveryCode = 'NET_PROTOCOL_MISMATCH: unable to load paired Macs'
+      this.startDiscovery()
+    })
+  }
+
+  private beginPairing(service: DiscoveredSecondDisplayService): void {
+    this.pendingPairingFingerprint = service.fingerprint
+    this.pendingPairingName = service.name
+    this.pairingCodeInput = ''
+    this.pairingQrVerified = false
+    this.pairingStatus = '请扫描 Mac 上的二维码，或输入 Mac 显示的校验码'
+  }
+
+  private cancelPairing(): void {
+    this.pairingOperationGeneration += 1
+    this.pendingPairingFingerprint = ''
+    this.pendingPairingName = ''
+    this.pairingCodeInput = ''
+    this.pairingQrVerified = false
+    this.pairingStatus = ''
+  }
+
+  private scanPairingQRCode(): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.pairingStatus = 'NET_PROTOCOL_MISMATCH: application context is unavailable'
+      return
+    }
+    this.pairingOperationGeneration += 1
+    const activeGeneration: number = this.pairingOperationGeneration
+    scanBarcode.startScanForResult(context, {
+      scanTypes: [scanCore.ScanType.QR_CODE],
+      enableAlbum: true
+    }).then((result: scanBarcode.ScanResult): void => {
+      if (activeGeneration !== this.pairingOperationGeneration) return
+      const payload = parsePairingPayload(result.originalValue)
+      if (payload === undefined) {
+        this.pairingStatus = 'NET_PROTOCOL_MISMATCH: invalid Second Display pairing QR code'
+        return
+      }
+      if (this.pendingPairingFingerprint.length === 64
+        && payload.fingerprint !== this.pendingPairingFingerprint) {
+        this.pairingStatus = 'NET_PROTOCOL_MISMATCH: QR code does not match the selected Mac'
+        return
+      }
+      const candidate: DiscoveredSecondDisplayService | undefined = this.discoveredServices.find(
+        (value: DiscoveredSecondDisplayService) => value.fingerprint === payload.fingerprint
+      )
+      this.pendingPairingFingerprint = payload.fingerprint
+      this.pendingPairingName = candidate?.name ?? payload.name
+      this.pairingQrVerified = true
+      this.pairingStatus = '二维码指纹已核对，请确认信任此 Mac'
+    }).catch((): void => {
+      if (activeGeneration === this.pairingOperationGeneration) {
+        this.pairingStatus = '扫码已取消或暂时不可用，可改用校验码'
+      }
+    })
+  }
+
+  private confirmPairing(): void {
+    const expectedCode: string = pairingVerificationCode(this.pendingPairingFingerprint)
+    const enteredCode: string = this.pairingCodeInput.replace(/[^0-9a-fA-F]/g, '').toUpperCase()
+    const expectedCompact: string = expectedCode.replace(/-/g, '')
+    if (!this.pairingQrVerified && (expectedCompact.length !== 12 || enteredCode !== expectedCompact)) {
+      this.pairingStatus = 'NET_PROTOCOL_MISMATCH: verification code does not match this Mac'
+      return
+    }
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.pairingStatus = 'NET_PROTOCOL_MISMATCH: application context is unavailable'
+      return
+    }
+    this.trustGeneration += 1
+    const activeGeneration: number = this.trustGeneration
+    this.trustStore.trust(
+      context,
+      this.trustedMacs,
+      this.pendingPairingFingerprint,
+      this.pendingPairingName
+    ).then((devices: TrustedMac[]): void => {
+      if (activeGeneration !== this.trustGeneration) return
+      this.trustedMacs = devices
+      this.manualTrustedFingerprint = this.pendingPairingFingerprint
+      this.cancelPairing()
+      this.discoveryController.stop()
+      this.startDiscovery()
+    }).catch((): void => {
+      if (activeGeneration === this.trustGeneration) {
+        this.pairingStatus = 'NET_PROTOCOL_MISMATCH: unable to save paired Mac'
+      }
+    })
+  }
+
+  private removePairing(service: DiscoveredSecondDisplayService): void {
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.discoveryCode = 'NET_PROTOCOL_MISMATCH: application context is unavailable'
+      return
+    }
+    this.trustGeneration += 1
+    const activeGeneration: number = this.trustGeneration
+    this.trustStore.remove(context, this.trustedMacs, service.fingerprint).then(
+      (devices: TrustedMac[]): void => {
+        if (activeGeneration !== this.trustGeneration) return
+        this.trustedMacs = devices
+        this.synchronizeManualTrustSelection()
+        if (this.selectedTarget?.fingerprint === service.fingerprint) {
+          this.selectedTarget = undefined
+        }
+        this.discoveryController.stop()
+        this.startDiscovery()
+      }
+    ).catch((): void => {
+      if (activeGeneration === this.trustGeneration) {
+        this.discoveryCode = 'NET_PROTOCOL_MISMATCH: unable to remove paired Mac'
+      }
+    })
+  }
+
+  private startDiscovery(): void {
+    if (this.isStreamReady() || this.connectionCode === 'CONNECTING'
+      || this.connectionCode === 'TLS_CONNECTED' || this.connectionCode === 'RECONNECTING') return
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.discoveryCode = 'NET_PROTOCOL_MISMATCH: application context is unavailable'
+      return
+    }
+    this.discoveryController.start(
+      context,
+      this.trustedMacs.map((value: TrustedMac) => value.fingerprint),
+      (services: DiscoveredSecondDisplayService[]): void => {
+        this.discoveredServices = services
+        if (this.selectedTarget !== undefined && this.selectedTarget.fingerprint.length === 64) {
+          const refreshed: DiscoveredSecondDisplayService | undefined = services.find(
+            (value: DiscoveredSecondDisplayService) =>
+              value.fingerprint === this.selectedTarget?.fingerprint
+          )
+          if (refreshed !== undefined) this.selectedTarget = refreshed
+        }
+        if (this.rediscoveryFingerprint.length === 64) {
+          const recovered: DiscoveredSecondDisplayService | undefined = services.find(
+            (value: DiscoveredSecondDisplayService) =>
+              value.paired && value.fingerprint === this.rediscoveryFingerprint
+          )
+          if (recovered !== undefined) {
+            this.rediscoveryFingerprint = ''
+            this.selectedTarget = recovered
+            this.connectReceiver(true)
+          }
+        }
+      },
+      (status: string): void => {
+        this.discoveryCode = status
+      }
+    )
+  }
+
+  private synchronizeManualTrustSelection(): void {
+    if (this.trustedMacs.some(
+      (value: TrustedMac) => value.fingerprint === this.manualTrustedFingerprint
+    )) return
+    this.manualTrustedFingerprint = this.trustedMacs.length > 0
+      ? this.trustedMacs[0].fingerprint : ''
+  }
+
+  private manualTarget(): DiscoveredSecondDisplayService | undefined {
+    const host: string = this.manualHost.trim()
+    if (host.length === 0 || host.length > 255 || /\s/.test(host)) {
+      this.applyConnectionCode('NET_PROTOCOL_MISMATCH: manual host is invalid')
+      return undefined
+    }
+    const trusted: TrustedMac | undefined = this.trustedMacs.find(
+      (value: TrustedMac) => value.fingerprint === this.manualTrustedFingerprint
+    )
+    if (trusted === undefined) {
+      this.applyConnectionCode(this.trustedMacs.length === 0
+        ? 'NET_PROTOCOL_MISMATCH: pair a Mac before manual connection'
+        : 'NET_PROTOCOL_MISMATCH: select a paired Mac identity for manual connection')
+      return undefined
+    }
+    return {
+      id: `manual-${host}`,
+      sourceName: 'manual',
+      name: '手动地址',
+      host: host,
+      family: host.indexOf(':') >= 0 ? 2 : 1,
+      controlPort: 52340,
+      videoPort: 52341,
+      fingerprint: trusted.fingerprint,
+      capabilities: '',
+      paired: true
+    }
+  }
+
+  private connectReceiver(
+    isRecovery: boolean = false,
+    target?: DiscoveredSecondDisplayService
+  ): void {
     this.cancelActiveTouch()
     if (!isRecovery) {
       this.cancelFastReconnect()
       this.reconnectDeadlineMs = 0
+      const requestedTarget: DiscoveredSecondDisplayService | undefined =
+        target === undefined ? this.manualTarget() : target
+      if (requestedTarget === undefined || !requestedTarget.paired) {
+        if (requestedTarget !== undefined) {
+          this.applyConnectionCode('NET_PROTOCOL_MISMATCH: discovered Mac is not paired')
+        }
+        return
+      }
+      this.selectedTarget = requestedTarget
     }
+    const activeTarget: DiscoveredSecondDisplayService | undefined = this.selectedTarget
+    if (activeTarget === undefined) {
+      this.applyConnectionCode('NET_PROTOCOL_MISMATCH: no Mac service was selected')
+      return
+    }
+    this.discoveryController.stop()
     this.refreshSystemDisplayResolution()
     if (this.systemDisplayWidth === 0 || this.systemDisplayHeight === 0) {
       this.applyConnectionCode('NET_PROTOCOL_MISMATCH: system display resolution is unavailable')
@@ -144,10 +426,12 @@ struct Index {
     this.receiverWorker = receiverWorker
     const command: ReceiverConnectCommand = {
       type: 'connect',
-      host: '192.168.43.9',
-      controlPort: 52340,
-      videoPort: 52341,
+      host: activeTarget.host,
+      family: activeTarget.family,
+      controlPort: activeTarget.controlPort,
+      videoPort: activeTarget.videoPort,
       caPem: receiverNative.getPocCACertificate(),
+      pinnedFingerprint: activeTarget.fingerprint,
       displayWidth: this.systemDisplayWidth,
       displayHeight: this.systemDisplayHeight,
       maxFps: this.systemMaxFps,
@@ -190,6 +474,9 @@ struct Index {
     if (nowMs >= this.reconnectDeadlineMs) {
       this.cancelFastReconnect()
       this.reconnectDeadlineMs = 0
+      this.rediscoveryFingerprint = this.selectedTarget?.fingerprint ?? ''
+      this.connectionCode = 'DISCONNECTED'
+      this.startDiscovery()
       return
     }
     if (this.reconnectTimer >= 0) return
@@ -447,6 +734,9 @@ struct Index {
     if (this.connectionCode.startsWith('NET_')) {
       return '请确认两台设备处于同一网络，并检查 Mac 端显示的 IP'
     }
+    if (this.discoveryCode === 'DISCOVERY_SEARCHING') {
+      return '正在搜索同一局域网中的 Second Display 服务'
+    }
     return '请先在 Mac 打开 Second Display，然后点击“Start Service”'
   }
 
@@ -607,19 +897,152 @@ struct Index {
             .fontSize(14)
             .fontColor('#D7DFEA')
             .textAlign(TextAlign.Center)
-          Text(
-            `系统分辨率 ${this.systemDisplayWidth}×${this.systemDisplayHeight} · 最高 ${this.systemMaxFps} FPS · Mac 192.168.43.9 · TLS`
-          )
+          Text(`系统分辨率 ${this.systemDisplayWidth}×${this.systemDisplayHeight} · 最高 ${this.systemMaxFps} FPS · TLS 1.3`)
             .fontSize(12)
             .fontColor('#AFC4DC')
 
-          Button(this.connectionCode === 'NOT_CONNECTED' ? '连接 Mac' : '重新连接')
-            .fontSize(15)
-            .fontWeight(FontWeight.Medium)
-            .fontColor(Color.White)
-            .backgroundColor('#5B8DEF')
-            .enabled(this.connectionCode !== 'CONNECTING' && this.connectionCode !== 'TLS_CONNECTED')
-            .onClick(() => this.connectReceiver())
+          if (this.discoveredServices.length > 0) {
+            Column({ space: 6 }) {
+              ForEach(this.discoveredServices, (service: DiscoveredSecondDisplayService) => {
+                Row({ space: 10 }) {
+                  Column({ space: 2 }) {
+                    Text(service.name)
+                      .fontSize(14)
+                      .fontWeight(FontWeight.Medium)
+                      .fontColor(Color.White)
+                    Text(
+                      `${service.host}:${service.controlPort} · ${service.fingerprint.slice(0, 8).toUpperCase()} · ${service.capabilities.length > 0 ? service.capabilities : 'h264'}`
+                    )
+                      .fontSize(10)
+                      .fontColor('#AFC4DC')
+                  }
+                  .alignItems(HorizontalAlign.Start)
+                  .layoutWeight(1)
+                  Text(service.paired ? '已配对' : '需要配对')
+                    .fontSize(10)
+                    .fontColor(service.paired ? '#7DE2A8' : '#FFC879')
+                  Button(service.paired ? '连接' : '配对')
+                    .fontSize(12)
+                    .fontColor(Color.White)
+                    .backgroundColor(service.paired ? '#5B8DEF' : '#B57B2C')
+                    .enabled(this.connectionCode !== 'CONNECTING'
+                      && this.connectionCode !== 'TLS_CONNECTED')
+                    .onClick(() => {
+                      if (service.paired) {
+                        this.connectReceiver(false, service)
+                      } else {
+                        this.beginPairing(service)
+                      }
+                    })
+                  if (service.paired) {
+                    Button('移除')
+                      .fontSize(10)
+                      .fontColor('#FFD0D0')
+                      .backgroundColor('#38000000')
+                      .onClick(() => this.removePairing(service))
+                  }
+                }
+                .width('100%')
+                .padding({ left: 12, right: 8, top: 7, bottom: 7 })
+                .backgroundColor('#24000000')
+                .borderRadius(10)
+              }, (service: DiscoveredSecondDisplayService) => service.id)
+            }
+            .width('100%')
+          } else {
+            Text(this.discoveryCode.startsWith('NET_') ? this.discoveryCode : '暂未发现可用 Mac 服务')
+              .fontSize(11)
+              .fontColor(this.discoveryCode.startsWith('NET_') ? '#FFB9B9' : '#AFC4DC')
+              .maxLines(2)
+          }
+
+          if (this.pendingPairingFingerprint.length === 64) {
+            Column({ space: 7 }) {
+              Text(`配对 ${this.pendingPairingName}`)
+                .fontSize(14)
+                .fontWeight(FontWeight.Medium)
+                .fontColor(Color.White)
+              Text(`证书指纹 ${this.pendingPairingFingerprint.slice(0, 12).toUpperCase()}…`)
+                .fontSize(10)
+                .fontColor('#AFC4DC')
+              Row({ space: 8 }) {
+                TextInput({ text: this.pairingCodeInput, placeholder: 'XXXX-XXXX-XXXX 校验码' })
+                  .fontSize(12)
+                  .fontColor(Color.White)
+                  .layoutWeight(1)
+                  .backgroundColor('#26000000')
+                  .onChange((value: string) => this.pairingCodeInput = value)
+                Button('扫描二维码')
+                  .fontSize(11)
+                  .fontColor(Color.White)
+                  .backgroundColor('#5B8DEF')
+                  .onClick(() => this.scanPairingQRCode())
+                Button('确认信任')
+                  .fontSize(11)
+                  .fontColor(Color.White)
+                  .backgroundColor(this.pairingQrVerified || this.pairingCodeInput.length > 0
+                    ? '#3A9D66' : '#46505E')
+                  .enabled(this.pairingQrVerified || this.pairingCodeInput.length > 0)
+                  .onClick(() => this.confirmPairing())
+                Button('取消')
+                  .fontSize(11)
+                  .fontColor(Color.White)
+                  .backgroundColor('#38000000')
+                  .onClick(() => this.cancelPairing())
+              }
+              .width('100%')
+              Text(this.pairingStatus)
+                .fontSize(10)
+                .fontColor(this.pairingStatus.startsWith('NET_') ? '#FFB9B9' : '#AFC4DC')
+            }
+            .width('100%')
+            .padding(10)
+            .backgroundColor('#30000000')
+            .borderRadius(10)
+          }
+
+          Row({ space: 8 }) {
+            TextInput({ text: this.manualHost, placeholder: '手动输入 Mac IP 地址' })
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor('#26000000')
+              .layoutWeight(1)
+              .onChange((value: string) => this.manualHost = value)
+            Button('手动连接')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor('#5B8DEF')
+              .enabled(this.connectionCode !== 'CONNECTING' && this.connectionCode !== 'TLS_CONNECTED')
+              .onClick(() => this.connectReceiver())
+            Button('刷新')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor('#38000000')
+              .onClick(() => this.startDiscovery())
+            Button('扫码配对')
+              .fontSize(12)
+              .fontColor(Color.White)
+              .backgroundColor('#B57B2C')
+              .onClick(() => this.scanPairingQRCode())
+          }
+          .width('100%')
+
+          if (this.trustedMacs.length > 1) {
+            Row({ space: 6 }) {
+              Text('手动连接身份')
+                .fontSize(10)
+                .fontColor('#AFC4DC')
+              ForEach(this.trustedMacs, (trusted: TrustedMac) => {
+                Button(`${trusted.name} · ${trusted.fingerprint.slice(0, 8).toUpperCase()}`)
+                  .fontSize(9)
+                  .fontColor(Color.White)
+                  .backgroundColor(trusted.fingerprint === this.manualTrustedFingerprint
+                    ? '#5B8DEF' : '#38000000')
+                  .onClick(() => this.manualTrustedFingerprint = trusted.fingerprint)
+              }, (trusted: TrustedMac) => trusted.fingerprint)
+            }
+            .width('100%')
+          }
 
           if (this.connectionCode.startsWith('NET_')) {
             Text(this.connectionCode)
@@ -630,7 +1053,7 @@ struct Index {
           }
         }
         .alignItems(HorizontalAlign.Center)
-        .width('52%')
+        .width('68%')
         .padding({ left: 28, right: 28, top: 22, bottom: 22 })
         .backgroundColor('#42000000')
         .borderRadius(18)

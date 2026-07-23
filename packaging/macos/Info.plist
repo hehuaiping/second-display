@@ -30,6 +30,10 @@
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
     <string>Second Display connects to a paired HarmonyOS receiver on your local network.</string>
+    <key>NSBonjourServices</key>
+    <array>
+        <string>_seconddisplay._tcp</string>
+    </array>
     <key>NSScreenCaptureUsageDescription</key>
     <string>Second Display captures only the virtual extended desktop that it creates.</string>
     <key>NSPrincipalClass</key>

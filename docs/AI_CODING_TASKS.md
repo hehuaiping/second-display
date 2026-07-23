@@ -440,7 +440,77 @@ M0 工程骨架
 
 这些任务不应进入首个端到端 PoC。只有 M5 稳定性指标达标后才能启动。
 
-## 10. AI Coding 评审清单
+## 10. P7：局域网服务发现与安全连接
+
+P7 在不改变现有媒体和输入协议的前提下，消除 HarmonyOS 端固定 IP 配置。发现信息只用于定位候选服务，不能替代已有配对信任。
+
+### T701｜发布 Second Display Bonjour 服务
+
+- 优先级：P0
+- 依赖：T301、T401、T501
+- 设计章节：6、10、14、16
+- 目标：macOS 服务进入监听态后，通过 mDNS/DNS-SD 发布 `_seconddisplay._tcp` 服务，并使广播与当前 session generation 同生共灭。
+- 允许修改：`macos/TransportCore/`、`macos/P3HostCore/`、macOS App 配置及对应测试。
+- 禁止修改：PrivateAPIShim、Capture、Codec、共享媒体/输入协议。
+- TXT 字段：`pv`、`vp`、`tls`、`fp`、`state`、`caps`；不得发布证书、私钥、设备 UUID 或配对令牌。
+- 验收：
+  - 只在控制、视频监听器均 ready 后发布服务；
+  - stop、连接建立、恢复重建和 generation 失效时撤销旧广播；
+  - TXT 指纹采用规范化 SHA-256，端口和协议版本有边界校验；
+  - 广播注册失败返回项目错误码，不使用 `fatalError` 或强制解包；
+  - 现有 `accept()` 调用保持兼容。
+- 验证命令：`swift test`
+
+### T702｜HarmonyOS 主动发现与服务列表
+
+- 优先级：P0
+- 依赖：T701
+- 设计章节：6、11、14、16
+- 目标：HarmonyOS 使用 mDNS 发现、解析、去重并展示同一局域网内的 Second Display 服务，用户可点击已配对服务连接。
+- 允许修改：`harmony/entry/src/main/ets/`、HarmonyOS 清单和对应测试。
+- 禁止修改：Native decoder、渲染、媒体帧协议。
+- 验收：
+  - 页面出现后自动发现，离开页面、开始连接或停止时注销回调并停止搜索；
+  - `serviceFound` 异步解析携带 discovery generation，旧回调不能重新加入列表；
+  - `serviceLost` 能移除项目，多网卡/重复回调按证书指纹和端点去重；
+  - 只接受 `pv=1`、TLS、有效控制/视频端口和可用主机地址；
+  - 未配对或指纹不匹配的服务不可静默连接；
+  - 保留手动 IP 输入和 10 秒原端点快速重连。
+- 验证命令：`hvigorw assembleHap --mode module -p product=default -p module=entry@default -p buildMode=debug --no-daemon`
+
+### T703｜动态地址证书固定
+
+- 优先级：P0
+- 依赖：T702
+- 设计章节：10、16
+- 目标：允许服务 IP 变化，同时继续以已配对证书 SHA-256 固定身份，不能把 mDNS TXT 当作信任根。
+- 允许修改：HarmonyOS 网络 worker、配对信息桥接和对应测试。
+- 禁止修改：TLS 最低版本、服务端私钥格式、媒体/输入协议。
+- 验收：
+  - 两条 TLS 通道在发送任何应用数据前读取远端证书；
+  - 控制、视频证书必须彼此一致，并同时匹配本地已配对证书和发现 TXT 指纹；
+  - 证书不匹配立即关闭连接并返回项目错误码；
+  - 手动地址连接也执行本地证书固定；
+  - 动态 IP 不依赖证书中的旧 IP SAN。
+- 验证命令：HarmonyOS HAP 构建及两台设备换网真机验证。
+
+### T704｜发现可靠性与首次配对
+
+- 优先级：P1
+- 依赖：T701、T702、T703
+- 设计章节：10、14、16
+- 目标：补齐多 Mac、网络切换、AP 禁止组播时的体验，并为未知服务增加用户确认的 PIN/二维码首次配对。
+- 允许修改：`macos/P3HostCore/`、macOS App 配对界面、`harmony/entry/src/main/ets/` 及对应测试。
+- 禁止修改：PrivateAPIShim、Capture、Codec、媒体/输入协议、TLS 最低版本。
+- 验收：
+  - 多个 Mac 可稳定出现且名称冲突不会误连；
+  - Wi-Fi/USB 网络切换后重新解析地址，不静默切换到不同指纹主机；
+  - 路由器禁用 mDNS 时仍可使用手动地址；
+  - PIN/二维码确认成功前不保存或信任新证书；
+  - 移除设备后吊销本地长期信任。
+- 验证命令：`swift test -c release`、HarmonyOS HAP 构建，以及多 Mac、换网、扫码/校验码和移除信任真机验证。
+
+## 11. AI Coding 评审清单
 
 每个任务合并前逐项回答：
 
@@ -455,7 +525,7 @@ M0 工程骨架
 - [ ] 是否实际运行构建和测试命令？
 - [ ] 是否更新设计文档或 ADR（如改变架构决策）？
 
-## 11. 建议的第一轮执行顺序
+## 12. 建议的第一轮执行顺序
 
 第一轮只执行以下任务：
 
@@ -472,4 +542,3 @@ T301 → T302 → T305
 ```
 
 T305 通过后再开始 T401 及后续产品化任务。这样可以尽早确认三个最高风险点：私有 API 是否能创建稳定扩展屏、ScreenCaptureKit 是否能可靠捕获、HarmonyOS 目标平板是否能持续硬解码。
-

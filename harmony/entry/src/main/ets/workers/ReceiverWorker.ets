@@ -1,14 +1,17 @@
 import { MessageEvents, ThreadWorkerGlobalScope, util, worker } from '@kit.ArkTS'
 import { socket } from '@kit.NetworkKit'
 import { BusinessError } from '@kit.BasicServicesKit'
+import { cryptoFramework } from '@kit.CryptoArchitectureKit'
 import receiverNative, { DecoderStatus } from 'libentry.so'
 
 interface ConnectCommand {
   type: string
   host: string
+  family: number
   controlPort: number
   videoPort: number
   caPem: string
+  pinnedFingerprint: string
   displayWidth: number
   displayHeight: number
   maxFps: number
@@ -87,6 +90,68 @@ let sendingKeyFrameRequestCount: number = 0
 let lastCursorSequence: number = -1
 let inputSequence: number = 0
 let feedbackSequence: number = 0
+
+function normalizeFingerprint(value: string): string {
+  const normalized: string = value.replace(/:/g, '').replace(/-/g, '').trim().toLowerCase()
+  if (normalized.length !== 64 || !/^[0-9a-f]+$/.test(normalized)) return ''
+  return normalized
+}
+
+async function fingerprintBytes(bytes: Uint8Array): Promise<string> {
+  try {
+    const digest = cryptoFramework.createMd('SHA256')
+    await digest.update({ data: bytes })
+    const result = await digest.digest()
+    return Array.from(result.data)
+      .map((byte: number) => byte.toString(16).padStart(2, '0'))
+      .join('')
+  } catch (error) {
+    throw new Error('certificate fingerprint calculation failed')
+  }
+}
+
+async function fingerprintCertificatePEM(pem: string): Promise<string> {
+  const base64: string = pem
+    .replace('-----BEGIN CERTIFICATE-----', '')
+    .replace('-----END CERTIFICATE-----', '')
+    .replace(/\r/g, '')
+    .replace(/\n/g, '')
+    .replace(/ /g, '')
+  if (base64.length === 0) return ''
+  return fingerprintBytes(new util.Base64Helper().decodeSync(base64))
+}
+
+async function verifyPinnedCertificates(
+  control: socket.TLSSocket,
+  video: socket.TLSSocket,
+  command: ConnectCommand,
+  activeGeneration: number
+): Promise<void> {
+  if (activeGeneration !== generation) throw new Error('stale connection generation')
+  const selectedFingerprint: string = normalizeFingerprint(command.pinnedFingerprint)
+  const legacyFingerprint: string = await fingerprintCertificatePEM(command.caPem)
+  const pairedFingerprint: string = selectedFingerprint.length === 64
+    ? selectedFingerprint : legacyFingerprint
+  if (pairedFingerprint.length !== 64) throw new Error('paired certificate fingerprint is invalid')
+  let certificates: socket.X509CertRawData[]
+  try {
+    certificates = await Promise.all([
+      control.getRemoteCertificate(),
+      video.getRemoteCertificate()
+    ])
+  } catch (error) {
+    throw new Error('unable to read remote TLS certificate')
+  }
+  if (activeGeneration !== generation) throw new Error('stale connection generation')
+  const fingerprints: string[] = await Promise.all([
+    fingerprintBytes(certificates[0].data),
+    fingerprintBytes(certificates[1].data)
+  ])
+  if (fingerprints[0] !== fingerprints[1]
+    || fingerprints[0] !== pairedFingerprint) {
+    throw new Error('remote certificate fingerprint does not match paired Mac')
+  }
+}
 
 function postStatus(code: string): void {
   const status: WorkerStatus = { type: 'status', code: code }
@@ -399,6 +464,10 @@ async function connect(command: ConnectCommand): Promise<void> {
     postStatus('NET_PROTOCOL_MISMATCH: paired CA certificate is unavailable')
     return
   }
+  if (command.family !== 1 && command.family !== 2) {
+    postStatus('NET_PROTOCOL_MISMATCH: invalid network address family')
+    return
+  }
   if (Math.min(command.displayWidth, command.displayHeight) < 600
     || Math.max(command.displayWidth, command.displayHeight) < 800
     || command.displayWidth > 8192 || command.displayHeight > 8192
@@ -411,9 +480,10 @@ async function connect(command: ConnectCommand): Promise<void> {
   controlSocket = control
   videoSocket = video
   try {
+    const localAddress: string = command.family === 2 ? '::' : '0.0.0.0'
     await Promise.all([
-      control.bind({ address: '0.0.0.0', family: 1, port: 0 }),
-      video.bind({ address: '0.0.0.0', family: 1, port: 0 })
+      control.bind({ address: localAddress, family: command.family, port: 0 }),
+      video.bind({ address: localAddress, family: command.family, port: 0 })
     ])
     const secureOptions: socket.TLSSecureOptions = {
       ca: command.caPem,
@@ -421,16 +491,18 @@ async function connect(command: ConnectCommand): Promise<void> {
     }
     await Promise.all([
       control.connect({
-        address: { address: command.host, family: 1, port: command.controlPort },
+        address: { address: command.host, family: command.family, port: command.controlPort },
         secureOptions: secureOptions,
-        skipRemoteValidation: false
+        // 动态地址可能不在旧证书 SAN 中；连接后、发送任何协议数据前执行精确证书固定。
+        skipRemoteValidation: true
       }),
       video.connect({
-        address: { address: command.host, family: 1, port: command.videoPort },
+        address: { address: command.host, family: command.family, port: command.videoPort },
         secureOptions: secureOptions,
-        skipRemoteValidation: false
+        skipRemoteValidation: true
       })
     ])
+    await verifyPinnedCertificates(control, video, command, activeGeneration)
     // 控制与视频分离，视频突发或拥塞时不会阻塞输入、心跳和关键帧请求。
     await Promise.all([
       control.setExtraOptions({ TCPNoDelay: true, keepAlive: true }),
