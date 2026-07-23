@@ -1,0 +1,2 @@
+# Consumer rules intentionally empty for the application module.
+

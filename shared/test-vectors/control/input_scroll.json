@@ -1,0 +1,10 @@
+{
+  "type": "inputEvent",
+  "sessionId": "9e24c419-01f4-4e5a-8f72-aabbccddeeff",
+  "sequence": 7,
+  "eventType": "scroll",
+  "normalizedX": 0.25,
+  "normalizedY": 0.75,
+  "deltaY": -12.5
+}
+

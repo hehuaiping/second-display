@@ -1,0 +1,10 @@
+{
+  "type": "receiverFeedback",
+  "protocolVersion": 1,
+  "sessionId": "9e24c419-01f4-4e5a-8f72-aabbccddeeff",
+  "sequence": 7,
+  "decoderQueueDepth": 1,
+  "droppedFrames": 2,
+  "renderedFramesPerSecond": 59.5,
+  "networkType": "wifi"
+}

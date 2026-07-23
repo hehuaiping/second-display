@@ -1,0 +1,11 @@
+#pragma once
+
+#include <cstddef>
+#include <cstdint>
+
+namespace second_display::decoder {
+
+inline constexpr std::uint8_t kH264TestVector[] = {@H264_TEST_VECTOR_BYTES@};
+inline constexpr std::size_t kH264TestVectorSize = sizeof(kH264TestVector);
+
+} // namespace second_display::decoder

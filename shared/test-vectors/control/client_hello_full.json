@@ -1,0 +1,16 @@
+{
+  "type": "clientHello",
+  "protocolVersion": 1,
+  "deviceId": "a3a6d287-fabc-4f6b-b019-112233445566",
+  "deviceName": "Harmony Tablet",
+  "nativeWidth": 2560,
+  "nativeHeight": 1600,
+  "deviceScale": 2.0,
+  "maxFps": 60,
+  "codecs": ["h264"],
+  "maxDecodeWidth": 2560,
+  "maxDecodeHeight": 1600,
+  "orientation": "landscape",
+  "features": ["dynamicStreamV1", "networkMigrationV1", "multiDisplayV1"],
+  "videoTransports": ["tlsTcp"]
+}

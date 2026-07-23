@@ -1,0 +1,11 @@
+{
+  "entries" : [
+    {
+      "osBuild" : "25F84",
+      "reason" : "Capability, create, enumerate, capture, and destroy verified on Apple silicon",
+      "status" : "supported"
+    }
+  ],
+  "schemaVersion" : 1,
+  "unknownBuildStatus" : "experimental"
+}

@@ -1,0 +1,210 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://second-display.local/schemas/control-message-v1.schema.json",
+  "title": "Second Display control message v1",
+  "oneOf": [
+    { "$ref": "#/$defs/clientHello" },
+    { "$ref": "#/$defs/serverReady" },
+    { "$ref": "#/$defs/error" },
+    { "$ref": "#/$defs/inputEvent" },
+    { "$ref": "#/$defs/gestureEvent" },
+    { "$ref": "#/$defs/cursorPosition" },
+    { "$ref": "#/$defs/requestKeyFrame" },
+    { "$ref": "#/$defs/heartbeat" },
+    { "$ref": "#/$defs/heartbeatAck" },
+    { "$ref": "#/$defs/receiverFeedback" }
+  ],
+  "$defs": {
+    "protocolVersion": { "type": "integer", "const": 1 },
+    "sessionId": { "type": "string", "format": "uuid" },
+    "clientHello": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "deviceId", "nativeWidth", "nativeHeight"],
+      "properties": {
+        "type": { "const": "clientHello" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "deviceId": { "type": "string", "format": "uuid" },
+        "deviceName": { "type": "string", "default": "Unknown Device" },
+        "nativeWidth": { "type": "integer", "minimum": 1 },
+        "nativeHeight": { "type": "integer", "minimum": 1 },
+        "deviceScale": { "type": "number", "exclusiveMinimum": 0, "default": 2.0 },
+        "maxFps": { "type": "integer", "minimum": 1, "default": 60 },
+        "codecs": {
+          "type": "array",
+          "items": { "enum": ["h264", "hevc"] },
+          "minItems": 1,
+          "default": ["h264"]
+        },
+        "maxDecodeWidth": { "type": "integer", "minimum": 1 },
+        "maxDecodeHeight": { "type": "integer", "minimum": 1 },
+        "orientation": { "enum": ["landscape", "portrait"], "default": "landscape" },
+        "features": {
+          "type": "array",
+          "items": {
+            "enum": ["cursorSideChannelV1", "dynamicStreamV1", "networkMigrationV1", "multiDisplayV1", "quicDatagramV1"]
+          },
+          "uniqueItems": true,
+          "default": []
+        },
+        "videoTransports": {
+          "type": "array",
+          "items": { "enum": ["tlsTcp", "quicDatagram"] },
+          "minItems": 1,
+          "uniqueItems": true,
+          "default": ["tlsTcp"]
+        }
+      }
+    },
+    "display": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["logicalWidth", "logicalHeight", "framebufferWidth", "framebufferHeight", "refreshRate", "serialNumber"],
+      "properties": {
+        "logicalWidth": { "type": "integer", "minimum": 1 },
+        "logicalHeight": { "type": "integer", "minimum": 1 },
+        "framebufferWidth": { "type": "integer", "minimum": 1 },
+        "framebufferHeight": { "type": "integer", "minimum": 1 },
+        "refreshRate": { "type": "integer", "minimum": 1 },
+        "serialNumber": { "type": "integer", "minimum": 1, "maximum": 4294967295 }
+      }
+    },
+    "stream": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["codec", "width", "height", "fps", "bitrate"],
+      "properties": {
+        "codec": { "enum": ["h264", "hevc"] },
+        "width": { "type": "integer", "minimum": 1 },
+        "height": { "type": "integer", "minimum": 1 },
+        "fps": { "type": "integer", "minimum": 1 },
+        "bitrate": { "type": "integer", "minimum": 1 },
+        "transport": { "enum": ["tlsTcp", "quicDatagram"], "default": "tlsTcp" }
+      }
+    },
+    "serverReady": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "display", "stream"],
+      "properties": {
+        "type": { "const": "serverReady" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "display": { "$ref": "#/$defs/display" },
+        "stream": { "$ref": "#/$defs/stream" }
+      }
+    },
+    "error": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "errorCode"],
+      "properties": {
+        "type": { "const": "error" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion", "default": 1 },
+        "errorCode": {
+          "enum": ["VD_CAPABILITY_MISSING", "VD_APPLY_FAILED", "VD_ENUMERATION_TIMEOUT", "VD_HIDPI_MODE_MISSING", "VD_MIRROR_DETACH_FAILED", "VD_TERMINATED_BY_SYSTEM", "CAP_PERMISSION_DENIED", "CAP_STREAM_STOPPED", "ENC_CREATE_FAILED", "ENC_BACKPRESSURE", "NET_PROTOCOL_MISMATCH", "DECODER_FATAL", "INPUT_PERMISSION_DENIED"]
+        },
+        "message": { "type": "string", "default": "" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "generation": { "type": "integer", "minimum": 0, "default": 0 }
+      }
+    },
+    "inputEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sessionId", "sequence", "eventType"],
+      "properties": {
+        "type": { "const": "inputEvent" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion", "default": 1 },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "eventType": { "enum": ["move", "leftDown", "leftUp", "drag", "scroll"] },
+        "normalizedX": { "type": "number", "minimum": 0, "maximum": 1 },
+        "normalizedY": { "type": "number", "minimum": 0, "maximum": 1 },
+        "deltaX": { "type": "number", "default": 0 },
+        "deltaY": { "type": "number", "default": 0 }
+      }
+    },
+    "gestureEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "sequence", "fingerCount", "gestureType", "direction", "magnitude"],
+      "properties": {
+        "type": { "const": "gestureEvent" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "fingerCount": { "type": "integer", "minimum": 3, "maximum": 5 },
+        "gestureType": { "enum": ["swipe", "pinch"] },
+        "direction": { "enum": ["up", "down", "left", "right", "in", "out"] },
+        "magnitude": { "type": "number", "minimum": 0 }
+      }
+    },
+    "requestKeyFrame": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "sessionId", "sequence"],
+      "properties": {
+        "type": { "const": "requestKeyFrame" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion", "default": 1 },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "reason": { "type": "string", "default": "decoderRecovery" }
+      }
+    },
+    "cursorPosition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "sequence", "normalizedX", "normalizedY", "visible"],
+      "properties": {
+        "type": { "const": "cursorPosition" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "normalizedX": { "type": "number", "minimum": 0, "maximum": 1 },
+        "normalizedY": { "type": "number", "minimum": 0, "maximum": 1 },
+        "visible": { "type": "boolean" }
+      }
+    },
+    "heartbeat": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "sequence", "sentAtUs"],
+      "properties": {
+        "type": { "const": "heartbeat" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "sentAtUs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "heartbeatAck": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "sequence", "sentAtUs", "receivedAtUs"],
+      "properties": {
+        "type": { "const": "heartbeatAck" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "sentAtUs": { "type": "integer", "minimum": 0 },
+        "receivedAtUs": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "receiverFeedback": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "protocolVersion", "sessionId", "sequence", "decoderQueueDepth", "droppedFrames", "renderedFramesPerSecond", "networkType"],
+      "properties": {
+        "type": { "const": "receiverFeedback" },
+        "protocolVersion": { "$ref": "#/$defs/protocolVersion" },
+        "sessionId": { "$ref": "#/$defs/sessionId" },
+        "sequence": { "type": "integer", "minimum": 0 },
+        "decoderQueueDepth": { "type": "integer", "minimum": 0, "maximum": 64 },
+        "droppedFrames": { "type": "integer", "minimum": 0 },
+        "renderedFramesPerSecond": { "type": "number", "minimum": 0, "maximum": 240 },
+        "networkType": { "type": "string", "minLength": 1, "maxLength": 32 }
+      }
+    }
+  }
+}

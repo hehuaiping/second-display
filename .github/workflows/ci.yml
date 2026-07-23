@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  macos:
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate shared vectors
+        run: python3 tools/validate_shared_vectors.py
+      - name: Build macOS Debug app
+        run: swift build -c debug
+      - name: Run macOS tests
+        run: swift test -c debug
+      - name: Verify release logging policy
+        run: swift test -c release
+      - name: Enforce private API isolation
+        run: |
+          if rg -n '\bCGVirtualDisplay(Descriptor|Settings|Mode)?\b' macos --glob '!macos/VirtualDisplayCore/PrivateAPIShim/**'; then
+            echo 'CGVirtualDisplay private types must remain in PrivateAPIShim' >&2
+            exit 1
+          fi
+      - name: Generate macOS compatibility candidate
+        run: python3 tools/macos_compatibility_smoke.py
+      - name: Upload compatibility candidate
+        uses: actions/upload-artifact@v4
+        with:
+          name: macos-compatibility-${{ runner.os }}
+          path: .build/compatibility/*.json
+
+  harmony-protocol:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure dependency-free Harmony C++ tests
+        run: cmake -S harmony/entry/src/main/cpp -B .build/harmony-host -DBUILD_PROTOCOL_TESTS=ON -DCMAKE_BUILD_TYPE=Release
+      - name: Build Harmony C++ tests
+        run: cmake --build .build/harmony-host --parallel
+      - name: Run Harmony C++ tests
+        run: ctest --test-dir .build/harmony-host --output-on-failure

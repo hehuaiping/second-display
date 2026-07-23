@@ -1,0 +1,7 @@
+{
+  "type": "heartbeat",
+  "protocolVersion": 1,
+  "sessionId": "b5d63783-1436-4e3c-ae5e-60f8a027f391",
+  "sequence": 42,
+  "sentAtUs": 1000000
+}

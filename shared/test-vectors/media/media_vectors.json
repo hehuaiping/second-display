@@ -1,0 +1,26 @@
+[
+  {
+    "bytes" : 6773,
+    "codec" : "h264",
+    "fps" : 60,
+    "frameCount" : 30,
+    "height" : 800,
+    "name" : "h264-1280x800-60",
+    "path" : "h264_1280x800_60.h264",
+    "profile" : "high",
+    "sha256" : "7fb66bddb93808f6bedeb74c97632cce00158d01a9757f45ec199a546e30f294",
+    "width" : 1280
+  },
+  {
+    "bytes" : 11544,
+    "codec" : "h264",
+    "fps" : 60,
+    "frameCount" : 30,
+    "height" : 1200,
+    "name" : "h264-1920x1200-60",
+    "path" : "h264_1920x1200_60.h264",
+    "profile" : "high",
+    "sha256" : "a11ccca866743ca65271260574923edbc0a545edc7b1b1a62deb167f602433a4",
+    "width" : 1920
+  }
+]

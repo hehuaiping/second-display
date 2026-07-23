@@ -1,0 +1,11 @@
+{
+  "modelVersion": "6.0.0",
+  "name": "second-display-harmony",
+  "version": "1.0.0",
+  "description": "HarmonyOS NEXT receiver for Second Display",
+  "main": "",
+  "author": "",
+  "license": "UNLICENSED",
+  "dependencies": {},
+  "devDependencies": {}
+}

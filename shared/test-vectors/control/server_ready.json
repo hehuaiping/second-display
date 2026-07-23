@@ -1,0 +1,21 @@
+{
+  "type": "serverReady",
+  "protocolVersion": 1,
+  "sessionId": "9e24c419-01f4-4e5a-8f72-aabbccddeeff",
+  "display": {
+    "logicalWidth": 1280,
+    "logicalHeight": 800,
+    "framebufferWidth": 2560,
+    "framebufferHeight": 1600,
+    "refreshRate": 60,
+    "serialNumber": 123456
+  },
+  "stream": {
+    "codec": "h264",
+    "width": 1920,
+    "height": 1200,
+    "fps": 60,
+    "bitrate": 16000000,
+    "transport": "tlsTcp"
+  }
+}

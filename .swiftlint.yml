@@ -1,0 +1,11 @@
+included:
+  - macos
+excluded:
+  - .build
+line_length:
+  warning: 110
+  error: 140
+force_cast: error
+force_try: error
+force_unwrapping: error
+

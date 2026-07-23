@@ -1,0 +1,16 @@
+{
+  "string": [
+    {
+      "name": "module_desc",
+      "value": "Second Display receiver"
+    },
+    {
+      "name": "ability_desc",
+      "value": "Second Display receiver main ability"
+    },
+    {
+      "name": "foundation_ready",
+      "value": "P0 engineering foundation is ready."
+    }
+  ]
+}
