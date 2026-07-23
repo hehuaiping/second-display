@@ -192,10 +192,17 @@ final class P4SessionAndInputTests: XCTestCase {
         let desktop = InjectedGestureAction.shortcut(
             InjectedKeyboardShortcut(keyCode: 103, flags: .maskSecondaryFn)
         )
-        XCTAssertEqual(poster.gestureActions, navigation + [
+        let zoomActions: [InjectedGestureAction] = [
             .shortcut(InjectedKeyboardShortcut(keyCode: 27, flags: .maskCommand)),
             .shortcut(InjectedKeyboardShortcut(keyCode: 24, flags: .maskCommand)),
-        ] + navigation + [apps, desktop] + navigation + [apps, desktop])
+        ]
+        var expectedActions = navigation
+        expectedActions.append(contentsOf: zoomActions)
+        expectedActions.append(contentsOf: navigation)
+        expectedActions.append(contentsOf: [apps, desktop])
+        expectedActions.append(contentsOf: navigation)
+        expectedActions.append(contentsOf: [apps, desktop])
+        XCTAssertEqual(poster.gestureActions, expectedActions)
     }
 
     func testKeyboardShortcutPlannerPostsRealModifierLifecycle() {
