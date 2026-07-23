@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 @preconcurrency import Network
 import SecondDisplayCore
 @preconcurrency import Security
@@ -88,6 +89,19 @@ public enum TLSIdentityLoader {
             Unmanaged.passUnretained(identityValue as AnyObject).toOpaque()
         ).takeUnretainedValue()
     }
+
+    public static func certificateSHA256Fingerprint(identity: SecIdentity) throws -> String {
+        var certificate: SecCertificate?
+        let status = SecIdentityCopyCertificate(identity, &certificate)
+        guard status == errSecSuccess, let certificate else {
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "Unable to read TLS certificate from server identity"
+            )
+        }
+        let digest = SHA256.hash(data: SecCertificateCopyData(certificate) as Data)
+        return digest.map { String(format: "%02x", $0) }.joined()
+    }
 }
 
 public final class NWTransportListener: @unchecked Sendable {
@@ -95,6 +109,11 @@ public final class NWTransportListener: @unchecked Sendable {
     private let queue: DispatchQueue
     private let readyGate = ListenerGate<Void>()
     private let connectionGate = ListenerGate<NWConnection>()
+    private let registrationGate = ListenerGate<Void>()
+    private let stateLock = NSLock()
+    private var started = false
+    private var ready = false
+    private var cancelled = false
 
     public init(port: NWEndpoint.Port, parameters: NWParameters) throws {
         do {
@@ -106,25 +125,82 @@ public final class NWTransportListener: @unchecked Sendable {
             label: "second-display.transport.listener.\(port.rawValue)", qos: .userInitiated)
     }
 
-    public func accept() async throws -> NWByteTransportConnection {
-        listener.stateUpdateHandler = { [readyGate] state in
-            switch state {
-            case .ready:
-                readyGate.complete(.success(()))
-            case .failed(let error):
-                readyGate.complete(.failure(Self.map(error)))
-            case .cancelled:
-                readyGate.complete(.failure(CancellationError()))
-            default:
-                break
+    /// 启动监听但不等待客户端连接，供上层在广播服务前确认所有端口均已 ready。
+    public func start() async throws {
+        let shouldStart = stateLock.withLock { () -> Bool in
+            guard !cancelled, !started else { return false }
+            started = true
+            return true
+        }
+        if shouldStart {
+            listener.stateUpdateHandler = { [readyGate, stateLock] state in
+                switch state {
+                case .ready:
+                    stateLock.withLock { self.ready = true }
+                    readyGate.complete(.success(()))
+                case .failed(let error):
+                    readyGate.complete(.failure(Self.map(error)))
+                case .cancelled:
+                    readyGate.complete(.failure(CancellationError()))
+                default:
+                    break
+                }
+            }
+            listener.newConnectionHandler = { [connectionGate] connection in
+                connectionGate.complete(.success(connection))
+            }
+            listener.start(queue: queue)
+        }
+        let isReady = stateLock.withLock { ready }
+        if isReady { return }
+        try await withTaskCancellationHandler {
+            try await readyGate.value()
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    /// 在已启动的 listener 上发布 Bonjour；注册完成前不会返回。
+    public func advertise(_ service: SecondDisplayBonjourService) async throws {
+        try await start()
+        listener.serviceRegistrationUpdateHandler = { [registrationGate] change in
+            if case .add = change {
+                registrationGate.complete(.success(()))
             }
         }
-        listener.newConnectionHandler = { [connectionGate] connection in
-            connectionGate.complete(.success(connection))
+        listener.service = service.networkService
+        let timeoutTask = Task { [registrationGate] in
+            do {
+                try await Task.sleep(for: .seconds(5))
+                registrationGate.complete(
+                    .failure(
+                        SessionError(
+                            code: .netProtocolMismatch,
+                            detail: "Bonjour service registration timed out"
+                        )
+                    )
+                )
+            } catch {
+                return
+            }
         }
-        listener.start(queue: queue)
+        defer { timeoutTask.cancel() }
+        try await withTaskCancellationHandler {
+            try await registrationGate.value()
+        } onCancel: {
+            self.cancel()
+        }
+    }
+
+    public func stopAdvertising() {
+        listener.service = nil
+        listener.serviceRegistrationUpdateHandler = nil
+    }
+
+    /// 保持旧调用兼容：未显式 start 时，accept 仍会自动启动 listener。
+    public func accept() async throws -> NWByteTransportConnection {
+        try await start()
         return try await withTaskCancellationHandler {
-            try await readyGate.value()
             let connection = try await connectionGate.value()
             return NWByteTransportConnection(connection: connection)
         } onCancel: {
@@ -133,11 +209,14 @@ public final class NWTransportListener: @unchecked Sendable {
     }
 
     public func cancel() {
+        stateLock.withLock { cancelled = true }
+        stopAdvertising()
         listener.stateUpdateHandler = nil
         listener.newConnectionHandler = nil
         listener.cancel()
         readyGate.complete(.failure(CancellationError()))
         connectionGate.complete(.failure(CancellationError()))
+        registrationGate.complete(.failure(CancellationError()))
     }
 
     private static func map(_ error: NWError) -> SessionError {

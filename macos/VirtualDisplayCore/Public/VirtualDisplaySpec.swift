@@ -119,7 +119,7 @@ public struct DisplayIdentityGenerator: Sendable {
 }
 
 public final class DisplayIdentityRegistry: @unchecked Sendable {
-    // CGVirtualDisplay 要求进程内 serial 唯一；注册表覆盖多个 Provider，不能只做实例内检查。
+    // 底层虚拟显示要求进程内 serial 唯一；注册表覆盖多个 Provider，不能只做实例内检查。
     public static let shared = DisplayIdentityRegistry()
 
     private let lock = NSLock()

@@ -26,6 +26,9 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
             data: configuration.identityData,
             password: configuration.identityPassword
         )
+        let advertisedFingerprint = try
+            configuration.certificateFingerprint
+            ?? TLSIdentityLoader.certificateSHA256Fingerprint(identity: identity)
         guard let controlPort = NWEndpoint.Port(rawValue: configuration.controlPort),
             let videoPort = NWEndpoint.Port(rawValue: configuration.videoPort)
         else {
@@ -80,15 +83,31 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
         var displayObserverTask: Task<Void, Never>?
 
         do {
+            // 两个端口先进入 ready，再发布控制端口对应的 DNS-SD 服务，避免发现后连接到半启动服务。
+            try await videoListener.start()
+            try await controlListener.start()
+            let codecs = VideoEncoderCapability.supportsHardwareHEVC
+                ? ["h264", "hevc"] : ["h264"]
+            let service = try SecondDisplayBonjourService(
+                name: configuration.bonjourServiceName,
+                controlPort: configuration.controlPort,
+                videoPort: configuration.videoPort,
+                certificateFingerprint: advertisedFingerprint,
+                capabilities: codecs
+            )
+            try await controlListener.advertise(service)
             await onUpdate(
                 P3HostUpdate(
                     phase: .listening,
-                    message: "Listening on TLS ports \(configuration.controlPort)/\(configuration.videoPort)"
+                    message:
+                        "Discoverable on the local network · TLS \(configuration.controlPort)/\(configuration.videoPort)"
                 )
             )
             async let acceptedControl = controlListener.accept()
             async let acceptedVideo = videoListener.accept()
             let accepted = try await (acceptedControl, acceptedVideo)
+            // 单设备 MVP 在占用状态不继续广播，避免其他接收端连接后才发现服务忙。
+            controlListener.stopAdvertising()
             controlConnection = accepted.0
             videoConnection = accepted.1
             try Task.checkCancellation()

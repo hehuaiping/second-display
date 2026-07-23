@@ -1,5 +1,6 @@
 import Foundation
 import Network
+import P3HostCore
 import SecondDisplayCore
 import SharedProtocol
 import XCTest
@@ -7,6 +8,21 @@ import XCTest
 @testable import TransportCore
 
 final class TransportTests: XCTestCase {
+    func testPairingPresentationContainsFullFingerprintAndStableVerificationCode() throws {
+        let fingerprint = String(repeating: "ab", count: 32)
+        let presentation = try P3PairingPresentation(
+            fingerprint: fingerprint,
+            name: "Office Mac"
+        )
+
+        XCTAssertEqual(presentation.fingerprint, fingerprint)
+        XCTAssertEqual(presentation.verificationCode, "ABAB-ABAB-ABAB")
+        let data = try XCTUnwrap(presentation.encodedJSON().data(using: .utf8))
+        let decoded = try JSONDecoder().decode(P3PairingPresentation.self, from: data)
+        XCTAssertEqual(decoded, presentation)
+        XCTAssertFalse(try presentation.encodedJSON().contains("password"))
+    }
+
     func testControlParserHandlesPartialAndStickyFramesAndIgnoresUnknown() throws {
         let codec = LengthPrefixedControlCodec()
         let first = try codec.encode(Heartbeat(sessionId: "session", sequence: 1, sentAtUs: 10))
@@ -157,6 +173,65 @@ final class TransportTests: XCTestCase {
         let parameters = TLSNetworkParameters.client()
         let options = parameters.defaultProtocolStack.transportProtocol as? NWProtocolTCP.Options
         XCTAssertEqual(options?.noDelay, true)
+    }
+
+    func testBonjourMetadataIsBoundedAndContainsNoPairingSecret() throws {
+        let service = try SecondDisplayBonjourService(
+            name: "Office Mac",
+            controlPort: 52_340,
+            videoPort: 52_341,
+            certificateFingerprint:
+                "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99:"
+                + "AA:BB:CC:DD:EE:FF:00:11:22:33:44:55:66:77:88:99",
+            capabilities: ["hevc", "h264", "h264"]
+        )
+        XCTAssertEqual(service.certificateFingerprint.count, 64)
+        XCTAssertEqual(service.textRecord["pv"], "1")
+        XCTAssertEqual(service.textRecord["vp"], "52341")
+        XCTAssertEqual(service.textRecord["tls"], "1")
+        XCTAssertEqual(service.textRecord["state"], "ready")
+        XCTAssertEqual(service.textRecord["caps"], "h264,hevc")
+        XCTAssertNil(service.textRecord["certificate"])
+        XCTAssertNil(service.textRecord["token"])
+    }
+
+    func testBonjourMetadataRejectsInvalidFingerprintAndPort() {
+        XCTAssertThrowsError(
+            try SecondDisplayBonjourService(
+                name: "Mac",
+                controlPort: 52_340,
+                videoPort: 52_341,
+                certificateFingerprint: "not-sha256",
+                capabilities: ["h264"]
+            )
+        ) { error in
+            XCTAssertEqual((error as? SessionError)?.code, .netProtocolMismatch)
+        }
+        XCTAssertThrowsError(
+            try SecondDisplayBonjourService(
+                name: "Mac",
+                controlPort: 0,
+                videoPort: 52_341,
+                certificateFingerprint: String(repeating: "a", count: 64),
+                capabilities: ["h264"]
+            )
+        )
+    }
+
+    func testBonjourListenerRegistersWhenExplicitlyEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_BONJOUR_INTEGRATION"] == "1" else {
+            throw XCTSkip("Set RUN_BONJOUR_INTEGRATION=1 for the local DNS-SD integration test")
+        }
+        let listener = try NWTransportListener(port: .any, parameters: .tcp)
+        defer { listener.cancel() }
+        let service = try SecondDisplayBonjourService(
+            name: "Second Display Test",
+            controlPort: 52_340,
+            videoPort: 52_341,
+            certificateFingerprint: String(repeating: "a", count: 64),
+            capabilities: ["h264"]
+        )
+        try await listener.advertise(service)
     }
 
     func testHandshakeNegotiatesCompatibleH264Configuration() throws {

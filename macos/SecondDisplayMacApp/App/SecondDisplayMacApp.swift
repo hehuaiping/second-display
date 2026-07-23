@@ -1,6 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
+import CoreImage.CIFilterBuiltins
 import CryptoKit
 import Darwin
 import Foundation
@@ -171,6 +172,29 @@ private struct HostServiceView: View {
                     Text(model.certificateFingerprint)
                         .font(.system(.caption, design: .monospaced))
                         .textSelection(.enabled)
+                    HStack(alignment: .top, spacing: 16) {
+                        if let image = model.pairingQRCode {
+                            Image(nsImage: image)
+                                .interpolation(.none)
+                                .resizable()
+                                .frame(width: 128, height: 128)
+                                .background(Color.white)
+                                .accessibilityLabel("Second Display pairing QR code")
+                        }
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("Scan this QR code in the HarmonyOS app")
+                                .font(.headline)
+                            Text("Verification code")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Text(model.pairingVerificationCode)
+                                .font(.system(.title3, design: .monospaced).bold())
+                                .textSelection(.enabled)
+                            Text("Trust is saved only after confirmation on the receiver.")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                     Text(model.pairingLocation)
                         .font(.caption)
                         .foregroundStyle(.secondary)
@@ -222,6 +246,8 @@ private final class HostServiceModel: ObservableObject {
     @Published private(set) var accessibilityAllowed = false
     @Published private(set) var certificateFingerprint = "Unavailable"
     @Published private(set) var pairingLocation = ""
+    @Published private(set) var pairingVerificationCode = "Unavailable"
+    @Published private(set) var pairingQRCode: NSImage?
     @Published private(set) var capabilitySummary = "Checking"
     @Published private(set) var streamMode = "—"
     @Published private(set) var currentBitrate = "—"
@@ -309,7 +335,8 @@ private final class HostServiceModel: ObservableObject {
         recentErrorCode = "—"
         let configuration = P3HostConfiguration(
             identityData: credentials.identityData,
-            identityPassword: credentials.password
+            identityPassword: credentials.password,
+            certificateFingerprint: credentials.fingerprint
         )
         await service.start(configuration: configuration) { [weak self] event in
             await self?.apply(event)
@@ -440,17 +467,44 @@ private final class HostServiceModel: ObservableObject {
             pairingReady = true
             certificateFingerprint = loaded.fingerprint
             pairingLocation = loaded.directory.path
+            let presentation = try P3PairingPresentation(
+                fingerprint: loaded.fingerprint,
+                name: Host.current().localizedName ?? "Second Display Mac"
+            )
+            pairingVerificationCode = presentation.verificationCode
+            pairingQRCode = try makePairingQRCode(payload: presentation.encodedJSON())
         } catch let error as SessionError {
             credentials = nil
             pairingReady = false
             certificateFingerprint = "Unavailable"
             pairingLocation = error.errorDescription ?? error.code.rawValue
+            pairingVerificationCode = "Unavailable"
+            pairingQRCode = nil
         } catch {
             credentials = nil
             pairingReady = false
             certificateFingerprint = "Unavailable"
             pairingLocation = "NET_PROTOCOL_MISMATCH: unable to load pairing identity"
+            pairingVerificationCode = "Unavailable"
+            pairingQRCode = nil
         }
+    }
+
+    private func makePairingQRCode(payload: String) throws -> NSImage {
+        let filter = CIFilter.qrCodeGenerator()
+        filter.message = Data(payload.utf8)
+        filter.correctionLevel = "M"
+        guard let output = filter.outputImage else {
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "Unable to generate pairing QR code"
+            )
+        }
+        let scaled = output.transformed(by: CGAffineTransform(scaleX: 8, y: 8))
+        let representation = NSCIImageRep(ciImage: scaled)
+        let image = NSImage(size: representation.size)
+        image.addRepresentation(representation)
+        return image
     }
 }
 
