@@ -18,6 +18,8 @@
   "buildOptionSet": [
     {
       "name": "release",
+      // AppGallery Connect 只接受不可调试的正式构建产物。
+      "debuggable": false,
       "arkOptions": {
         "obfuscation": {
           "ruleOptions": {

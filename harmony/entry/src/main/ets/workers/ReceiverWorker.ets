@@ -187,7 +187,9 @@ function sendClientHello(command: ConnectCommand, activeGeneration: number): voi
     features: ['dynamicStreamV1', 'networkMigrationV1', 'multiDisplayV1'],
     videoTransports: ['tlsTcp']
   })
-  controlSocket.send(frameControlMessage(hello)).catch(() => postStatus('NET_PROTOCOL_MISMATCH: hello send failed'))
+  controlSocket.send(frameControlMessage(hello)).catch(() => {
+    if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: hello send failed')
+  })
 }
 
 function postCursorPosition(message: ControlEnvelope, activeGeneration: number): void {
@@ -229,7 +231,11 @@ function sendHeartbeatAck(message: ControlEnvelope, activeGeneration: number): v
     receivedAtUs: Date.now() * 1000
   })
   controlSocket.send(frameControlMessage(acknowledgement))
-    .catch(() => postStatus('NET_PROTOCOL_MISMATCH: heartbeat acknowledgement failed'))
+    .catch(() => {
+      if (activeGeneration === generation) {
+        postStatus('NET_PROTOCOL_MISMATCH: heartbeat acknowledgement failed')
+      }
+    })
 }
 
 function sendInputEvent(command: InputCommand, activeGeneration: number): void {
@@ -261,7 +267,9 @@ function sendInputEvent(command: InputCommand, activeGeneration: number): void {
     deltaY: deltaY
   })
   controlSocket.send(frameControlMessage(message))
-    .catch(() => postStatus('NET_PROTOCOL_MISMATCH: input event send failed'))
+    .catch(() => {
+      if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: input event send failed')
+    })
 }
 
 function sendGestureEvent(command: InputCommand, activeGeneration: number): void {
@@ -445,6 +453,7 @@ async function connect(command: ConnectCommand): Promise<void> {
   generation += 1
   const activeGeneration: number = generation
   await closeSockets(activeGeneration)
+  if (activeGeneration !== generation) return
   if (normalizeFingerprint(command.pinnedFingerprint).length !== 64) {
     postStatus('NET_PROTOCOL_MISMATCH: paired certificate fingerprint is unavailable')
     return
@@ -470,6 +479,7 @@ async function connect(command: ConnectCommand): Promise<void> {
       control.bind({ address: localAddress, family: command.family, port: 0 }),
       video.bind({ address: localAddress, family: command.family, port: 0 })
     ])
+    if (activeGeneration !== generation) return
     const secureOptions: socket.TLSSecureOptions = {
       protocols: socket.Protocol.TLSv13
     }
@@ -486,12 +496,15 @@ async function connect(command: ConnectCommand): Promise<void> {
         skipRemoteValidation: true
       })
     ])
+    if (activeGeneration !== generation) return
     await verifyPinnedCertificates(control, video, command, activeGeneration)
+    if (activeGeneration !== generation) return
     // 控制与视频分离，视频突发或拥塞时不会阻塞输入、心跳和关键帧请求。
     await Promise.all([
       control.setExtraOptions({ TCPNoDelay: true, keepAlive: true }),
       video.setExtraOptions({ TCPNoDelay: true, keepAlive: true })
     ])
+    if (activeGeneration !== generation) return
     control.on('message', (info: socket.SocketMessageInfo) => receiveControl(info.message, activeGeneration))
     control.on('close', () => {
       if (activeGeneration === generation) postStatus('DISCONNECTED')
@@ -511,9 +524,6 @@ async function connect(command: ConnectCommand): Promise<void> {
     video.on('error', () => {
       if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: video TLS error')
     })
-    if (activeGeneration !== generation) {
-      return
-    }
     postStatus('TLS_CONNECTED')
     sendClientHello(command, activeGeneration)
   } catch (error) {
