@@ -15,6 +15,10 @@ import {
   parsePairingPayload,
   TrustedMac
 } from '../services/PairingTrustStore'
+import {
+  canPromoteSurfaceReady,
+  isConnectionAttemptPending
+} from '../services/ConnectionRecoveryPolicy'
 
 PersistentStorage.persistProp('secondDisplayDeviceId', '')
 PersistentStorage.persistProp('secondDisplayPrivacyAccepted', false)
@@ -93,6 +97,8 @@ struct Index {
   private pendingPointerDownTimer: number = -1
   private reconnectTimer: number = -1
   private reconnectDeadlineMs: number = 0
+  private connectionTimeoutTimer: number = -1
+  private connectionAttemptGeneration: number = 0
   private hadStreamingSession: boolean = false
   private scrolling: boolean = false
   private lastNormalizedX: number = 0.5
@@ -146,6 +152,8 @@ struct Index {
     this.removingPairingFingerprint = ''
     this.cancelActiveTouch()
     this.cancelFastReconnect()
+    this.cancelConnectionTimeout()
+    this.connectionAttemptGeneration += 1
     this.networkChangeMonitor.stop()
     this.discoveryController.stop()
     this.trustGeneration += 1
@@ -508,36 +516,45 @@ struct Index {
       return
     }
     this.applyConnectionCode('CONNECTING')
-    this.workerGeneration += 1
-    const activeGeneration: number = this.workerGeneration
-    if (this.receiverWorker !== undefined) {
-      try {
-        this.receiverWorker.postMessage({ type: 'stop' })
-      } catch (error) {
-        this.applyConnectionCode('NET_PROTOCOL_MISMATCH: unable to replace receiver worker')
+    this.cancelConnectionTimeout()
+    this.connectionAttemptGeneration += 1
+    const activeAttemptGeneration: number = this.connectionAttemptGeneration
+    let receiverWorker: worker.ThreadWorker | undefined =
+      isRecovery ? this.receiverWorker : undefined
+    if (receiverWorker === undefined) {
+      this.workerGeneration += 1
+      const activeWorkerGeneration: number = this.workerGeneration
+      if (this.receiverWorker !== undefined) {
+        try {
+          this.receiverWorker.postMessage({ type: 'stop' })
+        } catch (error) {
+          this.applyConnectionCode('NET_PROTOCOL_MISMATCH: unable to replace receiver worker')
+        }
       }
+      receiverWorker = new worker.ThreadWorker('../workers/ReceiverWorker.ets')
+      receiverWorker.onmessage = (event: MessageEvents): void => {
+        if (activeWorkerGeneration !== this.workerGeneration) {
+          return
+        }
+        const message: ReceiverWorkerStatus = event.data as ReceiverWorkerStatus
+        if (message.type === 'status') {
+          this.applyConnectionCode(message.code)
+        }
+      }
+      receiverWorker.onAllErrors = (error: ErrorEvent): void => {
+        if (activeWorkerGeneration === this.workerGeneration) {
+          this.applyConnectionCode(`NET_PROTOCOL_MISMATCH: ${error.message}`)
+        }
+      }
+      receiverWorker.onexit = (code: number): void => {
+        if (activeWorkerGeneration !== this.workerGeneration) return
+        this.receiverWorker = undefined
+        if (code !== 0) {
+          this.applyConnectionCode('NET_PROTOCOL_MISMATCH: receiver worker exited')
+        }
+      }
+      this.receiverWorker = receiverWorker
     }
-    const receiverWorker: worker.ThreadWorker = new worker.ThreadWorker('../workers/ReceiverWorker.ets')
-    receiverWorker.onmessage = (event: MessageEvents): void => {
-      if (activeGeneration !== this.workerGeneration) {
-        return
-      }
-      const message: ReceiverWorkerStatus = event.data as ReceiverWorkerStatus
-      if (message.type === 'status') {
-        this.applyConnectionCode(message.code)
-      }
-    }
-    receiverWorker.onAllErrors = (error: ErrorEvent): void => {
-      if (activeGeneration === this.workerGeneration) {
-        this.applyConnectionCode(`NET_PROTOCOL_MISMATCH: ${error.message}`)
-      }
-    }
-    receiverWorker.onexit = (code: number): void => {
-      if (activeGeneration === this.workerGeneration && code !== 0) {
-        this.applyConnectionCode('NET_PROTOCOL_MISMATCH: receiver worker exited')
-      }
-    }
-    this.receiverWorker = receiverWorker
     const command: ReceiverConnectCommand = {
       type: 'connect',
       host: activeTarget.host,
@@ -554,6 +571,7 @@ struct Index {
     }
     try {
       receiverWorker.postMessage(command)
+      this.scheduleConnectionTimeout(activeAttemptGeneration)
     } catch (error) {
       this.applyConnectionCode('NET_PROTOCOL_MISMATCH: unable to start receiver worker')
     }
@@ -565,6 +583,9 @@ struct Index {
     }
     this.connectionCode = code
     this.overlayVisible = code !== 'STREAM_READY'
+    if (!isConnectionAttemptPending(code)) {
+      this.cancelConnectionTimeout()
+    }
     if (code === 'STREAM_READY') {
       this.orientationRecoveryPending = false
       this.hadStreamingSession = true
@@ -607,6 +628,23 @@ struct Index {
     if (this.reconnectTimer >= 0) {
       clearTimeout(this.reconnectTimer)
       this.reconnectTimer = -1
+    }
+  }
+
+  private scheduleConnectionTimeout(activeAttemptGeneration: number): void {
+    this.cancelConnectionTimeout()
+    this.connectionTimeoutTimer = setTimeout((): void => {
+      this.connectionTimeoutTimer = -1
+      if (activeAttemptGeneration !== this.connectionAttemptGeneration
+        || !isConnectionAttemptPending(this.connectionCode)) return
+      this.applyConnectionCode('NET_PROTOCOL_MISMATCH: connection attempt timed out')
+    }, 8000)
+  }
+
+  private cancelConnectionTimeout(): void {
+    if (this.connectionTimeoutTimer >= 0) {
+      clearTimeout(this.connectionTimeoutTimer)
+      this.connectionTimeoutTimer = -1
     }
   }
 
@@ -942,6 +980,9 @@ struct Index {
     this.keyFrameRequests = status.keyFrameRequests
     this.lowLatencyEnabled = status.lowLatencyEnabled
     this.immediateRenderingEnabled = status.immediateRenderingEnabled
+    if (canPromoteSurfaceReady(this.connectionCode, status.running, status.code)) {
+      this.applyConnectionCode('STREAM_READY')
+    }
     this.postReceiverFeedback(status)
   }
 
