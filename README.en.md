@@ -133,9 +133,10 @@ Signing configuration is developer-local and must never be committed. See the
 
 Production releases are driven by `vMAJOR.MINOR.PATCH` tags. The workflow runs
 quality gates, Developer ID signing, Apple notarization, checksums, and artifact
-attestation before publishing a GitHub Release. See the
-[Tag-Driven Release process](docs/RELEASE_PROCESS.md) for credentials, the
-optional HarmonyOS self-hosted runner, and tagging instructions.
+attestation before publishing the macOS DMG. HarmonyOS currently receives a
+compile-only verification; it is neither signed nor uploaded as a release
+asset. See the [Tag-Driven Release process](docs/RELEASE_PROCESS.md) for
+credentials, the optional HarmonyOS build runner, and tagging instructions.
 
 ## Repository layout
 

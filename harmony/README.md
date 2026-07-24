@@ -15,6 +15,10 @@ hvigorw assembleHap --mode module -p product=default -p module=entry@default -p 
 The debug HAP may be built without a private signing certificate. Installing and launching it still
 requires a connected, authorized HarmonyOS tablet and the normal device deployment command.
 
+For an unsigned CI workspace, copy `build-profile.ci.json5` to the ignored
+`build-profile.json5` before running the same command. The CI profile deliberately contains no
+signing configuration or certificate paths.
+
 The native protocol tests are also host-buildable without HarmonyOS or signing:
 
 ```sh
