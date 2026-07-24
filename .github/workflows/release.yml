@@ -231,60 +231,38 @@ jobs:
             security delete-keychain "${MACOS_CI_KEYCHAIN}" || true
           fi
 
-  harmony-package:
-    name: Build signed HarmonyOS APP
-    if: vars.ENABLE_HARMONY_RELEASE == 'true'
+  harmony-build:
+    name: Verify HarmonyOS application build
+    if: vars.ENABLE_HARMONY_BUILD == 'true'
     needs: [validate, macos-quality, harmony-quality]
-    runs-on: [self-hosted, harmonyos-release]
-    environment: release
+    runs-on: [self-hosted, harmonyos-build]
     steps:
       - uses: actions/checkout@v6
-      - name: Load protected signing configuration
-        env:
-          BUILD_PROFILE_PATH: ${{ vars.HARMONY_BUILD_PROFILE_PATH }}
+      - name: Prepare unsigned build configuration
         run: |
-          if [[ -z "${BUILD_PROFILE_PATH}" || ! -f "${BUILD_PROFILE_PATH}" ]]; then
-            echo "HARMONY_BUILD_PROFILE_PATH is missing or unreadable" >&2
+          if rg -n '"signingConfigs?"|"material"|"storeFile"|"profile"' \
+            harmony/build-profile.ci.json5; then
+            echo "HarmonyOS CI build profile must not contain signing material" >&2
             exit 1
           fi
-          cp "${BUILD_PROFILE_PATH}" harmony/build-profile.json5
-          if ! rg -q '"signingConfig"\s*:\s*"release"' harmony/build-profile.json5; then
-            echo "HarmonyOS release product must use signingConfig=release" >&2
-            exit 1
-          fi
-      - name: Build signed HarmonyOS APP
+          cp harmony/build-profile.ci.json5 harmony/build-profile.json5
+      - name: Compile HarmonyOS debug HAP
         working-directory: harmony
         run: |
           hvigorw clean --no-daemon
-          hvigorw assembleApp \
-            --mode project \
+          hvigorw assembleHap \
+            --mode module \
             -p product=default \
-            -p buildMode=release \
+            -p module=entry@default \
+            -p buildMode=debug \
             --no-daemon
-      - name: Prepare HarmonyOS release asset
+      - name: Verify HAP output exists
         run: |
-          APP_PATH="harmony/build/outputs/default/harmony-default-signed.app"
-          if [[ ! -f "${APP_PATH}" ]]; then
-            echo "Signed HarmonyOS APP was not produced" >&2
+          if ! find harmony/entry/build -type f -name '*.hap' -print -quit \
+            | grep -q .; then
+            echo "HarmonyOS debug HAP was not produced" >&2
             exit 1
           fi
-          mkdir -p release-assets
-          cp "${APP_PATH}" \
-            "release-assets/SecondDisplay-${{ needs.validate.outputs.release_label }}-harmonyos.app"
-          (
-            cd release-assets
-            shasum -a 256 SecondDisplay-*.app > SHA256SUMS-harmonyos.txt
-          )
-      - name: Upload HarmonyOS release asset
-        uses: actions/upload-artifact@v4
-        with:
-          name: release-harmonyos
-          path: release-assets/
-          if-no-files-found: error
-          retention-days: 14
-      - name: Remove workspace signing configuration
-        if: always()
-        run: rm -f harmony/build-profile.json5
 
   publish:
     name: Publish GitHub Release
@@ -294,14 +272,14 @@ jobs:
       needs.macos-quality.result == 'success' &&
       needs.harmony-quality.result == 'success' &&
       needs.macos-package.result == 'success' &&
-      (needs.harmony-package.result == 'success' ||
-       needs.harmony-package.result == 'skipped')
+      (needs.harmony-build.result == 'success' ||
+       needs.harmony-build.result == 'skipped')
     needs:
       - validate
       - macos-quality
       - harmony-quality
       - macos-package
-      - harmony-package
+      - harmony-build
     runs-on: ubuntu-24.04
     permissions:
       contents: write

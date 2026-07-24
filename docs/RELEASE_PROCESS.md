@@ -10,8 +10,8 @@ Pull Request 上发布制品。
   完整性验证。
 - 发布 DMG、构建信息、SHA-256 校验和，并生成 GitHub Artifact Attestation。
 - 自动生成 Release Notes。`v1.2.3-beta.1` 等标签会发布为 prerelease。
-- HarmonyOS Release APP 可由受保护的自托管 Runner 构建；默认关闭，避免将签名材料
-  放入公共 GitHub Runner。
+- HarmonyOS 仅执行 debug HAP 编译验证，不签名、不上传制品，也不加入 GitHub
+  Release。完整编译门禁可通过自托管 Runner 启用。
 
 ## 版本规则
 
@@ -59,21 +59,21 @@ base64 -i DeveloperID.p12 | pbcopy
 base64 -i AuthKey_XXXXXXXXXX.p8 | pbcopy
 ```
 
-## 可选的 HarmonyOS Release Runner
+## 可选的 HarmonyOS 编译 Runner
 
-GitHub 托管 Runner 不预装 DevEco Studio/HarmonyOS SDK。若需要把签名后的 `.app` 同时
-附加到 GitHub Release：
+GitHub 托管 Runner 不预装 DevEco Studio/HarmonyOS SDK。若需要在标签发布前执行完整
+HarmonyOS 应用编译验证：
 
-1. 准备仅用于发布的自托管 Runner，并添加 `harmonyos-release` 标签。
+1. 准备受控的自托管 Runner，并添加 `harmonyos-build` 标签。
 2. 安装匹配项目的 HarmonyOS SDK、Node.js、ohpm 和 hvigorw，并确保 `hvigorw` 在
    `PATH`。
-3. 将 Release `build-profile.json5` 和它引用的 `.p12`、`.cer`、`.p7b` 保存在 Runner
-   的受保护目录，禁止其他仓库或普通用户读取。
-4. 设置 Repository variable `HARMONY_BUILD_PROFILE_PATH` 为该配置文件的绝对路径。
-5. 设置 Repository variable `ENABLE_HARMONY_RELEASE=true`。
+3. 流水线会用仓库内不含签名字段的 `harmony/build-profile.ci.json5` 覆盖本地
+   `build-profile.json5`，不得向 CI 模板加入证书、Profile 或密钥字段。
+4. 设置 Repository variable `ENABLE_HARMONY_BUILD=true`。
 
-签名配置只会复制进被 Git 忽略的工作区文件，作业结束后会删除。HarmonyOS APP 仍应
-通过 AppGallery Connect 完成正式上架；GitHub Release 附件适合留档和受控测试分发。
+该作业运行 `assembleHap` 的 debug 编译并确认生成 `.hap`，随后丢弃工作区，不上传
+HarmonyOS 制品。HarmonyOS 正式签名与上架继续在 DevEco Studio/AppGallery Connect
+流程中完成。
 
 ## 创建发布
 
@@ -91,7 +91,7 @@ git push origin v1.2.3
 1. 标签与版本校验。
 2. 双端质量门禁。
 3. macOS 签名、公证和分发验证。
-4. 可选的 HarmonyOS Release 构建。
+4. 可选的 HarmonyOS debug HAP 编译验证。
 5. 创建 Draft Release、上传全部制品和校验和。
 6. 所有上传成功后才发布 Release。
 
