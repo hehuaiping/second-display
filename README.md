@@ -120,6 +120,12 @@ hvigorw assembleHap --mode module \
 签名配置只保存在开发者本机，不能提交到 Git。更多命令见
 [HarmonyOS 构建说明](harmony/README.md)。
 
+### GitHub Release
+
+正式发布由 `vMAJOR.MINOR.PATCH` 标签驱动，执行测试、Developer ID 签名、Apple 公证、
+校验和与制品证明后才创建 GitHub Release。配置 Secrets、可选 HarmonyOS 自托管 Runner
+和创建标签的完整步骤见 [Tag-Driven Release 发布流程](docs/RELEASE_PROCESS.md)。
+
 ## 目录结构
 
 | 目录 | 内容 |

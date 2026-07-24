@@ -6,14 +6,16 @@ SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
 APP_VERSION=${APP_VERSION:-1.0.0}
 APP_BUILD_NUMBER=${APP_BUILD_NUMBER:-1}
+RELEASE_LABEL=${RELEASE_LABEL:-$APP_VERSION}
 SIGN_IDENTITY=${MACOS_SIGN_IDENTITY:--}
+INSTALL_LOCAL_PAIRING_IDENTITY=${INSTALL_LOCAL_PAIRING_IDENTITY:-1}
 APP_NAME="Second Display"
 EXECUTABLE_NAME="SecondDisplayMacApp"
 BUNDLE_IDENTIFIER="com.cuihua.cloud.display.macos"
-OUTPUT_DIRECTORY="$WORKSPACE_DIRECTORY/dist"
+OUTPUT_DIRECTORY=${OUTPUT_DIRECTORY:-"$WORKSPACE_DIRECTORY/dist"}
 APP_BUNDLE="$OUTPUT_DIRECTORY/$APP_NAME.app"
 ARCHITECTURE=$(uname -m)
-DMG_PATH="$OUTPUT_DIRECTORY/SecondDisplay-$APP_VERSION-macos-$ARCHITECTURE.dmg"
+DMG_PATH="$OUTPUT_DIRECTORY/SecondDisplay-$RELEASE_LABEL-macos-$ARCHITECTURE.dmg"
 TEMPORARY_DIRECTORY=$(mktemp -d /tmp/second-display-package.XXXXXX)
 PAIRING_SOURCE="$WORKSPACE_DIRECTORY/.build/p3-poc-tls"
 PAIRING_DESTINATION="$HOME/Library/Application Support/Second Display/Pairing"
@@ -24,13 +26,18 @@ cleanup() {
 trap cleanup EXIT INT TERM
 
 cd "$WORKSPACE_DIRECTORY"
-"$WORKSPACE_DIRECTORY/tools/provision_p3_tls.sh"
-mkdir -p "$PAIRING_DESTINATION"
-chmod 700 "$PAIRING_DESTINATION"
-for FILE_NAME in identity.p12 password cert.pem
-do
-    install -m 600 "$PAIRING_SOURCE/$FILE_NAME" "$PAIRING_DESTINATION/$FILE_NAME"
-done
+if [[ "$INSTALL_LOCAL_PAIRING_IDENTITY" == "1" ]]; then
+    "$WORKSPACE_DIRECTORY/tools/provision_p3_tls.sh"
+    mkdir -p "$PAIRING_DESTINATION"
+    chmod 700 "$PAIRING_DESTINATION"
+    for FILE_NAME in identity.p12 password cert.pem
+    do
+        install -m 600 "$PAIRING_SOURCE/$FILE_NAME" "$PAIRING_DESTINATION/$FILE_NAME"
+    done
+elif [[ "$INSTALL_LOCAL_PAIRING_IDENTITY" != "0" ]]; then
+    print -u2 "NET_PROTOCOL_MISMATCH: INSTALL_LOCAL_PAIRING_IDENTITY must be 0 or 1"
+    exit 1
+fi
 swift build -c release --product "$EXECUTABLE_NAME"
 SWIFT_BINARY_DIRECTORY=$(swift build -c release --show-bin-path)
 EXECUTABLE_PATH="$SWIFT_BINARY_DIRECTORY/$EXECUTABLE_NAME"
@@ -92,7 +99,19 @@ hdiutil create \
     -ov \
     "$DMG_PATH"
 
-if [[ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
+if [[ -n "${NOTARY_KEY_PATH:-}" || -n "${NOTARY_KEY_ID:-}" || -n "${NOTARY_ISSUER_ID:-}" ]]; then
+    if [[ -z "${NOTARY_KEY_PATH:-}" || -z "${NOTARY_KEY_ID:-}" || -z "${NOTARY_ISSUER_ID:-}" ]]; then
+        print -u2 "NET_PROTOCOL_MISMATCH: notary API key configuration is incomplete"
+        exit 1
+    fi
+    xcrun notarytool submit "$DMG_PATH" \
+        --key "$NOTARY_KEY_PATH" \
+        --key-id "$NOTARY_KEY_ID" \
+        --issuer "$NOTARY_ISSUER_ID" \
+        --wait
+    xcrun stapler staple "$DMG_PATH"
+    xcrun stapler validate "$DMG_PATH"
+elif [[ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
     xcrun notarytool submit "$DMG_PATH" \
         --keychain-profile "$NOTARY_KEYCHAIN_PROFILE" \
         --wait
@@ -104,5 +123,7 @@ fi
 
 print "Created $APP_BUNDLE"
 print "Created $DMG_PATH"
-print "Installed local pairing identity at $PAIRING_DESTINATION"
+if [[ "$INSTALL_LOCAL_PAIRING_IDENTITY" == "1" ]]; then
+    print "Installed local pairing identity at $PAIRING_DESTINATION"
+fi
 shasum -a 256 "$DMG_PATH"
