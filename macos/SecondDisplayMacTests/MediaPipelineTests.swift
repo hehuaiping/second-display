@@ -403,16 +403,15 @@ final class MediaPipelineTests: XCTestCase {
         pair.continuation.yield(stale)
         pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 17))
         pair.continuation.finish()
-        for _ in 0..<100 where await output.frames.isEmpty {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
 
         let snapshot = await metrics.snapshot()
         let frames = await output.frames
+        let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
         XCTAssertEqual(frames.count, 1)
-        XCTAssertTrue(frames[0].isKeyFrame)
+        XCTAssertTrue(frame.isKeyFrame)
     }
 
     func testCaptureTimestampAgeGateDropsWindowServerBacklog() async throws {
@@ -442,16 +441,15 @@ final class MediaPipelineTests: XCTestCase {
         pair.continuation.yield(stale)
         pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 18))
         pair.continuation.finish()
-        for _ in 0..<100 where await output.frames.isEmpty {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
 
         let snapshot = await metrics.snapshot()
         let frames = await output.frames
+        let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
         XCTAssertEqual(frames.count, 1)
-        XCTAssertTrue(frames[0].isKeyFrame)
+        XCTAssertTrue(frame.isKeyFrame)
     }
 
     func testExplicitDecoderRecoveryRequestForcesNextIDR() async throws {
@@ -768,13 +766,19 @@ private func makeFrame(
 
 private func waitForFrameCount(
     _ expectedCount: Int,
-    recorder: EncodedFrameRecorder
+    recorder: EncodedFrameRecorder,
+    timeout: Duration = .seconds(2)
 ) async throws {
-    for _ in 0..<100 {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
         if await recorder.frames.count >= expectedCount { return }
         try await Task.sleep(for: .milliseconds(1))
     }
-    XCTFail("Timed out waiting for \(expectedCount) encoded frames")
+    throw SessionError(
+        code: .capStreamStopped,
+        detail: "Timed out waiting for \(expectedCount) encoded frames"
+    )
 }
 
 private func awaitValue(

@@ -66,9 +66,9 @@ final class DisplayModeMaintainerTests: XCTestCase {
             isCurrentGeneration: { $0 == 9 },
             onFailure: { _ in XCTFail("Watchdog should restore the mode") }
         )
+        defer { watchdog.cancel() }
         controller.current = lowMode
-        try await Task.sleep(for: .milliseconds(30))
-        watchdog.cancel()
+        try await waitForMode(hiDPIMode, controller: controller)
         XCTAssertEqual(controller.current, hiDPIMode)
     }
 
@@ -113,6 +113,23 @@ final class DisplayModeMaintainerTests: XCTestCase {
             refreshRate: 60
         )
     }
+
+    private func waitForMode(
+        _ expectedMode: DisplayModeMetrics,
+        controller: FakeModeController,
+        timeout: Duration = .seconds(2)
+    ) async throws {
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: timeout)
+        while clock.now < deadline {
+            if controller.current == expectedMode { return }
+            try await Task.sleep(for: .milliseconds(1))
+        }
+        throw SessionError(
+            code: .vdHiDPIModeMissing,
+            detail: "Timed out waiting for the display watchdog to restore the HiDPI mode"
+        )
+    }
 }
 
 @MainActor
@@ -141,4 +158,3 @@ private final class FakeModeController: DisplayModeControlling {
         return detachError
     }
 }
-
