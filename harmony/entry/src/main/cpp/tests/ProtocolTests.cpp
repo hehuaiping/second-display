@@ -182,7 +182,33 @@ void TestIncrementalFrameParser()
     Check(prefix.Ok() && prefix.frames.empty(), "incremental parser waits for partial header");
     const auto frames = parser.Feed("current", sticky.data() + 7, sticky.size() - 7);
     Check(frames.Ok() && frames.frames.size() == 2, "incremental parser handles sticky frames");
+    Check(parser.BufferedBytes() == 0, "incremental parser releases fully consumed storage");
     Check(parser.Finish("current").Ok(), "incremental parser finishes on frame boundary");
+
+    std::vector<std::uint8_t> manySticky;
+    for (std::uint32_t sequence = 100; sequence < 2200; ++sequence) {
+        const auto encoded = EncodedFrame(sequence, sequence == 100);
+        manySticky.insert(manySticky.end(), encoded.begin(), encoded.end());
+    }
+    FrameParser compacting;
+    compacting.BeginSession("compacting");
+    const auto manyFrames = compacting.Feed("compacting", manySticky);
+    Check(manyFrames.Ok() && manyFrames.frames.size() == 2100,
+        "incremental parser parses many coalesced frames without per-frame compaction");
+    Check(compacting.BufferedBytes() == 0, "incremental parser clears consumed sticky storage");
+
+    const auto third = EncodedFrame(12);
+    FrameParser trailing;
+    trailing.BeginSession("trailing");
+    std::vector<std::uint8_t> fullAndPartial = first;
+    fullAndPartial.insert(fullAndPartial.end(), third.begin(), third.begin() + 19);
+    const auto initial = trailing.Feed("trailing", fullAndPartial);
+    Check(initial.Ok() && initial.frames.size() == 1 && trailing.BufferedBytes() == 19,
+        "incremental parser preserves only an incomplete trailing frame");
+    const auto completed = trailing.Feed(
+        "trailing", third.data() + 19, third.size() - 19);
+    Check(completed.Ok() && completed.frames.size() == 1 && trailing.BufferedBytes() == 0,
+        "incremental parser completes a trailing frame after deferred compaction");
 
     FrameParser oldSession;
     oldSession.BeginSession("new");

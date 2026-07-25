@@ -2,6 +2,7 @@
 @preconcurrency import CoreVideo
 import Foundation
 import SecondDisplayCore
+import SharedProtocol
 @preconcurrency import VideoToolbox
 
 public protocol VideoEncoding: Sendable {
@@ -202,7 +203,16 @@ public actor H264EncoderService: VideoEncoding {
             do {
                 let converted = try H264AnnexB.convert(
                     sampleBuffer: sampleBuffer,
-                    codec: codec
+                    codec: codec,
+                    makePrefix: { payloadLength, isKeyFrame in
+                        try VideoFrameCodec().encodeHeader(
+                            frameType: .video,
+                            flags: isKeyFrame ? [.keyframe] : [],
+                            sequence: frameSequence,
+                            ptsUs: MediaClock.microseconds(frame.presentationTimeStamp),
+                            captureUs: frame.captureTimestampUs,
+                            payloadLength: payloadLength)
+                    }
                 )
                 let completedUs = MediaClock.monotonicMicroseconds()
                 gate.complete(
@@ -216,6 +226,7 @@ public actor H264EncoderService: VideoEncoding {
                             encodeCompleteTimestampUs: completedUs,
                             lowLatencyRateControlEnabled: lowLatencyRateControl,
                             payload: converted.payload,
+                            preframedData: converted.preframedData,
                             generation: frame.generation
                         )
                     )
@@ -235,11 +246,14 @@ public actor H264EncoderService: VideoEncoding {
             throw error
         }
 
-        let result = try await withTaskCancellationHandler {
-            try await gate.value()
-        } onCancel: {
-            gate.complete(.failure(CancellationError()))
-        }
+        let framePeriodNanoseconds = UInt64(
+            max(1, (CMTimeGetSeconds(duration) * 1_000_000_000).rounded()))
+        let callbackTimeoutNanoseconds = max(
+            250_000_000,
+            framePeriodNanoseconds.multipliedReportingOverflow(by: 8).partialValue)
+        let result = try await waitForEncodeResult(
+            gate,
+            timeoutNanoseconds: callbackTimeoutNanoseconds)
         pending.removeValue(forKey: requestID)
         try Task.checkCancellation()
         guard session === sessionBox?.session, token == configurationToken else {
@@ -262,6 +276,7 @@ public actor H264EncoderService: VideoEncoding {
             encoderHardwareAccelerated: hardwareAccelerated,
             lowLatencyRateControlEnabled: encoded.lowLatencyRateControlEnabled,
             payload: encoded.payload,
+            preframedData: encoded.preframedData,
             generation: encoded.generation
         )
     }
@@ -410,12 +425,13 @@ private final class CompressionSessionBox: @unchecked Sendable {
     }
 }
 
-private final class EncodeResultGate: @unchecked Sendable {
+final class EncodeResultGate: @unchecked Sendable {
     typealias ResultType = Result<EncodedFrame?, Error>
 
     private let lock = NSLock()
     private var result: ResultType?
     private var continuation: CheckedContinuation<EncodedFrame?, Error>?
+    private var completed = false
 
     func value() async throws -> EncodedFrame? {
         try await withCheckedThrowingContinuation { continuation in
@@ -435,9 +451,8 @@ private final class EncodeResultGate: @unchecked Sendable {
 
     func complete(_ result: ResultType) {
         let continuation = lock.withLock { () -> CheckedContinuation<EncodedFrame?, Error>? in
-            if self.result != nil {
-                return nil
-            }
+            guard !completed else { return nil }
+            completed = true
             guard let continuation = self.continuation else {
                 self.result = result
                 return nil
@@ -449,7 +464,36 @@ private final class EncodeResultGate: @unchecked Sendable {
     }
 }
 
+func waitForEncodeResult(
+    _ gate: EncodeResultGate,
+    timeoutNanoseconds: UInt64
+) async throws -> EncodedFrame? {
+    let timeoutTask = Task {
+        do {
+            try await Task.sleep(nanoseconds: max(1, timeoutNanoseconds))
+            gate.complete(
+                .failure(
+                    SessionError(
+                        code: .encBackpressure,
+                        detail: "VideoToolbox produced no output before the encode watchdog deadline")))
+        } catch {
+            // 正常编码完成或外层任务取消时会取消 watchdog，不覆盖原始结果。
+        }
+    }
+    defer { timeoutTask.cancel() }
+    return try await withTaskCancellationHandler {
+        try await gate.value()
+    } onCancel: {
+        gate.complete(.failure(CancellationError()))
+    }
+}
+
 public enum H264AnnexB {
+    private struct PayloadStorage {
+        let payload: Data
+        let preframedData: Data?
+    }
+
     private struct NALRange {
         let offset: Int
         let length: Int
@@ -464,7 +508,7 @@ public enum H264AnnexB {
         guard (1...4).contains(nalUnitHeaderLength) else {
             throw SessionError(code: .encBackpressure, detail: "Invalid AVCC NAL length field")
         }
-        return try data.withUnsafeBytes { bytes in
+        return try data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
             let ranges = try nalRanges(in: bytes, nalUnitHeaderLength: nalUnitHeaderLength)
             return try makePayload(parameterSets: [], nalRanges: ranges) { offset, length, destination in
                 guard let source = bytes.baseAddress?.advanced(by: offset) else {
@@ -472,7 +516,7 @@ public enum H264AnnexB {
                 }
                 memcpy(destination, source, length)
                 return noErr
-            }
+            }.payload
         }
     }
 
@@ -501,8 +545,9 @@ public enum H264AnnexB {
 
     static func convert(
         sampleBuffer: CMSampleBuffer,
-        codec: VideoEncoderCodec = .h264
-    ) throws -> (payload: Data, isKeyFrame: Bool) {
+        codec: VideoEncoderCodec = .h264,
+        makePrefix: ((_ payloadLength: Int, _ isKeyFrame: Bool) throws -> Data)? = nil
+    ) throws -> (payload: Data, isKeyFrame: Bool, preframedData: Data?) {
         let isKeyFrame = keyFrameStatus(sampleBuffer)
         guard let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) else {
             throw SessionError(code: .encBackpressure, detail: "Encoded sample has no block buffer")
@@ -593,7 +638,7 @@ public enum H264AnnexB {
             totalLengthOut: &reportedTotalLength,
             dataPointerOut: &pointer
         )
-        let payload: Data
+        let storage: PayloadStorage
         if pointerStatus == noErr,
             contiguousLength == totalLength,
             reportedTotalLength == totalLength,
@@ -601,7 +646,13 @@ public enum H264AnnexB {
         {
             let bytes = UnsafeRawBufferPointer(start: pointer, count: totalLength)
             let ranges = try nalRanges(in: bytes, nalUnitHeaderLength: headerLength)
-            payload = try makePayload(parameterSets: parameterSets, nalRanges: ranges) {
+            storage = try makePayload(
+                parameterSets: parameterSets,
+                nalRanges: ranges,
+                makePrefix: makePrefix.map { factory in
+                    { length in try factory(length, isKeyFrame) }
+                }
+            ) {
                 offset, length, destination in
                 memcpy(destination, pointer.advanced(by: offset), length)
                 return noErr
@@ -611,7 +662,13 @@ public enum H264AnnexB {
                 in: blockBuffer,
                 totalLength: totalLength,
                 nalUnitHeaderLength: headerLength)
-            payload = try makePayload(parameterSets: parameterSets, nalRanges: ranges) {
+            storage = try makePayload(
+                parameterSets: parameterSets,
+                nalRanges: ranges,
+                makePrefix: makePrefix.map { factory in
+                    { length in try factory(length, isKeyFrame) }
+                }
+            ) {
                 offset, length, destination in
                 CMBlockBufferCopyDataBytes(
                     blockBuffer,
@@ -620,7 +677,7 @@ public enum H264AnnexB {
                     destination: destination)
             }
         }
-        return (payload, isKeyFrame)
+        return (storage.payload, isKeyFrame, storage.preframedData)
     }
 
     private static func nalRanges(
@@ -699,18 +756,24 @@ public enum H264AnnexB {
     private static func makePayload(
         parameterSets: [ParameterSet],
         nalRanges: [NALRange],
+        makePrefix: ((Int) throws -> Data)? = nil,
         copyNAL: (_ offset: Int, _ length: Int, _ destination: UnsafeMutableRawPointer) -> OSStatus
-    ) throws -> Data {
-        var outputLength = 0
+    ) throws -> PayloadStorage {
+        var payloadLength = 0
         for length in parameterSets.map(\.length) + nalRanges.map(\.length) {
-            let (nextLength, overflow) = outputLength.addingReportingOverflow(4 + length)
+            let (nextLength, overflow) = payloadLength.addingReportingOverflow(4 + length)
             guard !overflow else {
                 throw SessionError(code: .encBackpressure, detail: "Encoded access unit is too large")
             }
-            outputLength = nextLength
+            payloadLength = nextLength
         }
-        guard outputLength > 0 else {
+        guard payloadLength > 0 else {
             throw SessionError(code: .encBackpressure, detail: "Encoder emitted an empty access unit")
+        }
+        let prefix = try makePrefix?(payloadLength) ?? Data()
+        let (outputLength, overflow) = prefix.count.addingReportingOverflow(payloadLength)
+        guard !overflow else {
+            throw SessionError(code: .encBackpressure, detail: "Encoded access unit is too large")
         }
         var output = Data(count: outputLength)
         let status = output.withUnsafeMutableBytes { destination -> OSStatus in
@@ -718,7 +781,10 @@ public enum H264AnnexB {
                 return kCMBlockBufferBadPointerParameterErr
             }
             let bytes = baseAddress.assumingMemoryBound(to: UInt8.self)
-            var cursor = 0
+            if !prefix.isEmpty {
+                prefix.copyBytes(to: bytes, count: prefix.count)
+            }
+            var cursor = prefix.count
             func writeStartCode() {
                 bytes[cursor] = 0
                 bytes[cursor + 1] = 0
@@ -744,7 +810,12 @@ public enum H264AnnexB {
                 code: .encBackpressure,
                 detail: "Unable to copy encoded block buffer: OSStatus \(status)")
         }
-        return output
+        guard !prefix.isEmpty else {
+            return PayloadStorage(payload: output, preframedData: nil)
+        }
+        return PayloadStorage(
+            payload: output.dropFirst(prefix.count),
+            preframedData: output)
     }
 
     private static func keyFrameStatus(_ sampleBuffer: CMSampleBuffer) -> Bool {

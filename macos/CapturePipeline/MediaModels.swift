@@ -160,6 +160,7 @@ public struct EncodedFrame: Equatable, Sendable {
     public let encoderHardwareAccelerated: Bool?
     public let lowLatencyRateControlEnabled: Bool?
     public let payload: Data
+    package let preframedData: Data?
     public let generation: UInt64
 
     public init(
@@ -183,7 +184,47 @@ public struct EncodedFrame: Equatable, Sendable {
         self.encoderHardwareAccelerated = encoderHardwareAccelerated
         self.lowLatencyRateControlEnabled = lowLatencyRateControlEnabled
         self.payload = payload
+        self.preframedData = nil
         self.generation = generation
+    }
+
+    package init(
+        sequence: UInt32,
+        presentationTimeStampUs: UInt64,
+        isKeyFrame: Bool,
+        captureTimestampUs: UInt64,
+        encodeCallbackTimestampUs: UInt64? = nil,
+        encodeCompleteTimestampUs: UInt64,
+        encoderHardwareAccelerated: Bool? = nil,
+        lowLatencyRateControlEnabled: Bool? = nil,
+        payload: Data,
+        preframedData: Data?,
+        generation: UInt64
+    ) {
+        self.sequence = sequence
+        self.presentationTimeStampUs = presentationTimeStampUs
+        self.isKeyFrame = isKeyFrame
+        self.captureTimestampUs = captureTimestampUs
+        self.encodeCallbackTimestampUs = encodeCallbackTimestampUs ?? encodeCompleteTimestampUs
+        self.encodeCompleteTimestampUs = encodeCompleteTimestampUs
+        self.encoderHardwareAccelerated = encoderHardwareAccelerated
+        self.lowLatencyRateControlEnabled = lowLatencyRateControlEnabled
+        self.payload = payload
+        self.preframedData = preframedData
+        self.generation = generation
+    }
+
+    public static func == (lhs: EncodedFrame, rhs: EncodedFrame) -> Bool {
+        lhs.sequence == rhs.sequence
+            && lhs.presentationTimeStampUs == rhs.presentationTimeStampUs
+            && lhs.isKeyFrame == rhs.isKeyFrame
+            && lhs.captureTimestampUs == rhs.captureTimestampUs
+            && lhs.encodeCallbackTimestampUs == rhs.encodeCallbackTimestampUs
+            && lhs.encodeCompleteTimestampUs == rhs.encodeCompleteTimestampUs
+            && lhs.encoderHardwareAccelerated == rhs.encoderHardwareAccelerated
+            && lhs.lowLatencyRateControlEnabled == rhs.lowLatencyRateControlEnabled
+            && lhs.payload == rhs.payload
+            && lhs.generation == rhs.generation
     }
 }
 
@@ -211,23 +252,91 @@ public struct MediaMetricsSnapshot: Equatable, Sendable {
     public let contentActivity: ContentActivity
 }
 
+/// 固定窗口直方图避免长时间推流时反复 `removeFirst` 和排序整组样本。
+/// 延迟采用 100 微秒分桶；超过上限的异常值归入最后一桶，仍能反映尾延迟恶化。
+private struct SlidingHistogram: Sendable {
+    private let capacity: Int
+    private let bucketWidth: UInt64
+    private let maximumValue: UInt64
+    private var ring: [Int]
+    private var buckets: [UInt32]
+    private var count = 0
+    private var writeIndex = 0
+
+    init(capacity: Int, bucketWidth: UInt64, maximumValue: UInt64) {
+        self.capacity = max(1, capacity)
+        self.bucketWidth = max(1, bucketWidth)
+        self.maximumValue = maximumValue
+        self.ring = [Int](repeating: 0, count: max(1, capacity))
+        let bucketCount = Int(maximumValue / max(1, bucketWidth)) + 1
+        self.buckets = [UInt32](repeating: 0, count: max(1, bucketCount))
+    }
+
+    mutating func append(_ value: UInt64) {
+        let bucket = Int(min(value, maximumValue) / bucketWidth)
+        if count == capacity {
+            let replaced = ring[writeIndex]
+            buckets[replaced] -= 1
+        } else {
+            count += 1
+        }
+        ring[writeIndex] = bucket
+        buckets[bucket] += 1
+        writeIndex = (writeIndex + 1) % capacity
+    }
+
+    func percentile(_ fraction: Double) -> Double {
+        guard count > 0 else { return 0 }
+        let normalized = min(max(fraction.isFinite ? fraction : 0, 0), 1)
+        let zeroBasedIndex = min(
+            count - 1,
+            Int((Double(count - 1) * normalized).rounded(.up)))
+        let targetRank = zeroBasedIndex + 1
+        var observed = 0
+        for (index, frequency) in buckets.enumerated() {
+            observed += Int(frequency)
+            if observed >= targetRank {
+                return Double(UInt64(index) * bucketWidth)
+            }
+        }
+        return Double(maximumValue)
+    }
+
+    var sampleCount: Int { count }
+}
+
 public actor MediaPipelineMetrics {
+    private static let latencyBucketWidthUs: UInt64 = 100
+    private static let maximumTrackedLatencyUs: UInt64 = 2_000_000
+
     private var captureDrops: UInt64 = 0
     private var encodeDrops: UInt64 = 0
     private var sendDrops: UInt64 = 0
-    private var captureDeliveryLatenciesUs: [UInt64] = []
-    private var encodeQueueLatenciesUs: [UInt64] = []
-    private var encodeLatenciesUs: [UInt64] = []
-    private var videoToolboxLatenciesUs: [UInt64] = []
-    private var bitstreamConversionLatenciesUs: [UInt64] = []
+    private var captureDeliveryLatenciesUs: SlidingHistogram
+    private var encodeQueueLatenciesUs: SlidingHistogram
+    private var encodeLatenciesUs: SlidingHistogram
+    private var videoToolboxLatenciesUs: SlidingHistogram
+    private var bitstreamConversionLatenciesUs: SlidingHistogram
     private var encoderHardwareAccelerated: Bool?
     private var lowLatencyRateControlEnabled: Bool?
-    private var sendQueueLatenciesUs: [UInt64] = []
-    private var dirtyAreaPermille: [UInt64] = []
+    private var sendQueueLatenciesUs: SlidingHistogram
+    private var dirtyAreaPermille: SlidingHistogram
     private var currentBitrate = 0
     private var contentActivity: ContentActivity = .active
 
-    public init() {}
+    public init(sampleCapacity: Int = 4_096) {
+        let capacity = max(1, sampleCapacity)
+        captureDeliveryLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        encodeQueueLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        encodeLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        videoToolboxLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        bitstreamConversionLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        sendQueueLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
+        dirtyAreaPermille = SlidingHistogram(
+            capacity: capacity,
+            bucketWidth: 1,
+            maximumValue: 1_000)
+    }
 
     public func recordCaptureDrop(count: UInt64 = 1) {
         captureDrops &+= count
@@ -292,53 +401,50 @@ public actor MediaPipelineMetrics {
     }
 
     public func snapshot() -> MediaMetricsSnapshot {
-        let captureDelivery = captureDeliveryLatenciesUs.sorted()
-        let encodeQueue = encodeQueueLatenciesUs.sorted()
-        let encode = encodeLatenciesUs.sorted()
-        let videoToolbox = videoToolboxLatenciesUs.sorted()
-        let bitstreamConversion = bitstreamConversionLatenciesUs.sorted()
-        let sendQueue = sendQueueLatenciesUs.sorted()
-        let dirtyArea = dirtyAreaPermille.sorted()
         return MediaMetricsSnapshot(
             captureDropCount: captureDrops,
             encodeDropCount: encodeDrops,
             sendDropCount: sendDrops,
-            encodedFrameCount: UInt64(encodeLatenciesUs.count),
-            captureDeliveryP50Milliseconds: percentile(captureDelivery, fraction: 0.50),
-            captureDeliveryP95Milliseconds: percentile(captureDelivery, fraction: 0.95),
-            encodeQueueP50Milliseconds: percentile(encodeQueue, fraction: 0.50),
-            encodeQueueP95Milliseconds: percentile(encodeQueue, fraction: 0.95),
-            encodeP50Milliseconds: percentile(encode, fraction: 0.50),
-            encodeP95Milliseconds: percentile(encode, fraction: 0.95),
-            videoToolboxP50Milliseconds: percentile(videoToolbox, fraction: 0.50),
-            videoToolboxP95Milliseconds: percentile(videoToolbox, fraction: 0.95),
-            bitstreamConversionP50Milliseconds: percentile(bitstreamConversion, fraction: 0.50),
-            bitstreamConversionP95Milliseconds: percentile(bitstreamConversion, fraction: 0.95),
+            encodedFrameCount: UInt64(encodeLatenciesUs.sampleCount),
+            captureDeliveryP50Milliseconds: milliseconds(
+                captureDeliveryLatenciesUs.percentile(0.50)),
+            captureDeliveryP95Milliseconds: milliseconds(
+                captureDeliveryLatenciesUs.percentile(0.95)),
+            encodeQueueP50Milliseconds: milliseconds(encodeQueueLatenciesUs.percentile(0.50)),
+            encodeQueueP95Milliseconds: milliseconds(encodeQueueLatenciesUs.percentile(0.95)),
+            encodeP50Milliseconds: milliseconds(encodeLatenciesUs.percentile(0.50)),
+            encodeP95Milliseconds: milliseconds(encodeLatenciesUs.percentile(0.95)),
+            videoToolboxP50Milliseconds: milliseconds(
+                videoToolboxLatenciesUs.percentile(0.50)),
+            videoToolboxP95Milliseconds: milliseconds(
+                videoToolboxLatenciesUs.percentile(0.95)),
+            bitstreamConversionP50Milliseconds: milliseconds(
+                bitstreamConversionLatenciesUs.percentile(0.50)),
+            bitstreamConversionP95Milliseconds: milliseconds(
+                bitstreamConversionLatenciesUs.percentile(0.95)),
             encoderHardwareAccelerated: encoderHardwareAccelerated,
             lowLatencyRateControlEnabled: lowLatencyRateControlEnabled,
-            sendQueueP50Milliseconds: percentile(sendQueue, fraction: 0.50),
-            sendQueueP95Milliseconds: percentile(sendQueue, fraction: 0.95),
-            dirtyAreaP95Percent: percentileRaw(dirtyArea, fraction: 0.95) / 10,
+            sendQueueP50Milliseconds: milliseconds(sendQueueLatenciesUs.percentile(0.50)),
+            sendQueueP95Milliseconds: milliseconds(sendQueueLatenciesUs.percentile(0.95)),
+            dirtyAreaP95Percent: dirtyAreaPermille.percentile(0.95) / 10,
             currentBitrate: currentBitrate,
             contentActivity: contentActivity
         )
     }
 
-    private func append(_ latencyUs: UInt64, to values: inout [UInt64]) {
-        if values.count == 4_096 {
-            values.removeFirst(1_024)
-        }
+    private static func makeLatencyHistogram(capacity: Int) -> SlidingHistogram {
+        SlidingHistogram(
+            capacity: capacity,
+            bucketWidth: latencyBucketWidthUs,
+            maximumValue: maximumTrackedLatencyUs)
+    }
+
+    private func append(_ latencyUs: UInt64, to values: inout SlidingHistogram) {
         values.append(latencyUs)
     }
 
-    private func percentile(_ sorted: [UInt64], fraction: Double) -> Double {
-        percentileRaw(sorted, fraction: fraction) / 1_000
-    }
-
-    private func percentileRaw(_ sorted: [UInt64], fraction: Double) -> Double {
-        guard !sorted.isEmpty else { return 0 }
-        let index = min(sorted.count - 1, Int((Double(sorted.count - 1) * fraction).rounded(.up)))
-        return Double(sorted[index])
+    private func milliseconds(_ microseconds: Double) -> Double {
+        microseconds / 1_000
     }
 }
 

@@ -5,6 +5,7 @@ import Darwin
 import Foundation
 @preconcurrency import ScreenCaptureKit
 import SecondDisplayCore
+import SharedProtocol
 @preconcurrency import VideoToolbox
 import VirtualDisplayCore
 import XCTest
@@ -228,6 +229,41 @@ final class MediaPipelineTests: XCTestCase {
         XCTAssertEqual(snapshot.contentActivity, .staticContent)
     }
 
+    func testMediaMetricsSlidingWindowOverwritesOldSamplesWithoutChangingCapacity() async {
+        let metrics = MediaPipelineMetrics(sampleCapacity: 4)
+        for value in [1_000, 2_000, 3_000, 4_000, 8_000, 9_000] {
+            await metrics.recordEncodedFrame(latencyUs: UInt64(value))
+        }
+        let snapshot = await metrics.snapshot()
+        XCTAssertEqual(snapshot.encodedFrameCount, 4)
+        XCTAssertEqual(snapshot.encodeP50Milliseconds, 8)
+        XCTAssertEqual(snapshot.encodeP95Milliseconds, 9)
+    }
+
+    func testEncodeWatchdogReturnsProjectErrorAndSupportsCancellation() async throws {
+        let timeoutGate = EncodeResultGate()
+        do {
+            _ = try await waitForEncodeResult(timeoutGate, timeoutNanoseconds: 1_000_000)
+            XCTFail("Expected encode watchdog timeout")
+        } catch let error as SessionError {
+            XCTAssertEqual(error.code, .encBackpressure)
+        }
+
+        let cancellationGate = EncodeResultGate()
+        let task = Task {
+            try await waitForEncodeResult(
+                cancellationGate,
+                timeoutNanoseconds: 10_000_000_000)
+        }
+        task.cancel()
+        do {
+            _ = try await task.value
+            XCTFail("Expected encode wait cancellation")
+        } catch is CancellationError {
+            // Expected.
+        }
+    }
+
     func testCaptureServiceWaitsByDisplayIDAndRejectsOldGeneration() async throws {
         let provider = FakeShareableContentProvider(results: [
             [],
@@ -275,6 +311,17 @@ final class MediaPipelineTests: XCTestCase {
         XCTAssertLessThanOrEqual(encoded.encodeCallbackTimestampUs, encoded.encodeCompleteTimestampUs)
         XCTAssertNotNil(encoded.encoderHardwareAccelerated)
         XCTAssertNotNil(encoded.lowLatencyRateControlEnabled)
+        let framed = try XCTUnwrap(encoded.preframedData)
+        let protocolFrame = VideoFrame(
+            frameType: .video,
+            flags: [.keyframe],
+            sequence: encoded.sequence,
+            ptsUs: encoded.presentationTimeStampUs,
+            captureUs: encoded.captureTimestampUs,
+            payload: encoded.payload,
+            preframedData: framed)
+        XCTAssertEqual(try VideoFrameCodec().encode(protocolFrame), framed)
+        XCTAssertEqual(try VideoFrameCodec().decode(framed), protocolFrame)
         try await encoder.updateBitrate(12_000_000)
         await encoder.invalidate()
         do {

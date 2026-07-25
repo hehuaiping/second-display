@@ -27,6 +27,7 @@ public struct VideoFrame: Equatable, Sendable {
     public let ptsUs: UInt64
     public let captureUs: UInt64
     public let payload: Data
+    package let preframedData: Data?
 
     public init(
         frameType: VideoFrameType,
@@ -42,6 +43,34 @@ public struct VideoFrame: Equatable, Sendable {
         self.ptsUs = ptsUs
         self.captureUs = captureUs
         self.payload = payload
+        self.preframedData = nil
+    }
+
+    package init(
+        frameType: VideoFrameType,
+        flags: VideoFrameFlags,
+        sequence: UInt32,
+        ptsUs: UInt64,
+        captureUs: UInt64,
+        payload: Data,
+        preframedData: Data?
+    ) {
+        self.frameType = frameType
+        self.flags = flags
+        self.sequence = sequence
+        self.ptsUs = ptsUs
+        self.captureUs = captureUs
+        self.payload = payload
+        self.preframedData = preframedData
+    }
+
+    public static func == (lhs: VideoFrame, rhs: VideoFrame) -> Bool {
+        lhs.frameType == rhs.frameType
+            && lhs.flags == rhs.flags
+            && lhs.sequence == rhs.sequence
+            && lhs.ptsUs == rhs.ptsUs
+            && lhs.captureUs == rhs.captureUs
+            && lhs.payload == rhs.payload
     }
 }
 
@@ -51,21 +80,48 @@ public struct VideoFrameCodec: Sendable {
     public init() {}
 
     public func encode(_ frame: VideoFrame) throws -> Data {
-        guard frame.payload.count <= VideoFrame.maximumPayloadSize else {
+        let header = try encodeHeader(
+            frameType: frame.frameType,
+            flags: frame.flags,
+            sequence: frame.sequence,
+            ptsUs: frame.ptsUs,
+            captureUs: frame.captureUs,
+            payloadLength: frame.payload.count)
+        if let preframedData = frame.preframedData,
+            preframedData.count == VideoFrame.headerSize + frame.payload.count,
+            preframedData.prefix(VideoFrame.headerSize) == header
+        {
+            return preframedData
+        }
+        var data = header
+        data.reserveCapacity(VideoFrame.headerSize + frame.payload.count)
+        data.append(frame.payload)
+        return data
+    }
+
+    package func encodeHeader(
+        frameType: VideoFrameType,
+        flags: VideoFrameFlags,
+        sequence: UInt32,
+        ptsUs: UInt64,
+        captureUs: UInt64,
+        payloadLength: Int
+    ) throws -> Data {
+        guard payloadLength <= VideoFrame.maximumPayloadSize else {
             throw SessionError(code: .netProtocolMismatch, detail: "Video payload exceeds 16 MiB")
         }
-        guard let payloadLength = UInt32(exactly: frame.payload.count) else {
+        guard let networkPayloadLength = UInt32(exactly: payloadLength) else {
             throw SessionError(code: .netProtocolMismatch, detail: "Video payload length is invalid")
         }
         var data = Data(Self.magic)
+        data.reserveCapacity(VideoFrame.headerSize)
         data.append(1)
-        data.append(frame.frameType.rawValue)
-        append(frame.flags.rawValue, to: &data)
-        append(frame.sequence, to: &data)
-        append(frame.ptsUs, to: &data)
-        append(frame.captureUs, to: &data)
-        append(payloadLength, to: &data)
-        data.append(frame.payload)
+        data.append(frameType.rawValue)
+        append(flags.rawValue, to: &data)
+        append(sequence, to: &data)
+        append(ptsUs, to: &data)
+        append(captureUs, to: &data)
+        append(networkPayloadLength, to: &data)
         return data
     }
 
@@ -123,4 +179,3 @@ public struct VideoFrameCodec: Sendable {
         (0..<8).reduce(UInt64(0)) { ($0 << 8) | UInt64(bytes[offset + $1]) }
     }
 }
-

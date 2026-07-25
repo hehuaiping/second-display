@@ -54,6 +54,14 @@ interface WorkerCursorPosition {
   visible: boolean
 }
 
+interface PendingControlWrite {
+  data: ArrayBuffer
+  generation: number
+  failureCode: string
+  coalesceKey: string
+  keyFrameRequestCount: number
+}
+
 interface ControlEnvelope {
   type: string
   protocolVersion: number
@@ -89,6 +97,11 @@ let sendingKeyFrameRequestCount: number = 0
 let lastCursorSequence: number = -1
 let inputSequence: number = 0
 let feedbackSequence: number = 0
+// TLSSocket.send 只公开异步完成语义，没有承诺同一 Socket 可并发写入。
+// 所有控制消息因此由单写者队列串行发送；高频连续指针事件只保留尚未发送的最新位置。
+const CONTROL_SEND_QUEUE_LIMIT: number = 64
+let controlSendQueue: PendingControlWrite[] = []
+let controlSendInFlight: boolean = false
 
 function normalizeFingerprint(value: string): string {
   const normalized: string = value.replace(/:/g, '').replace(/-/g, '').trim().toLowerCase()
@@ -166,6 +179,88 @@ function frameControlMessage(value: string): ArrayBuffer {
   return framed.buffer
 }
 
+function failControlWrite(
+  write: PendingControlWrite,
+  activeSocket: socket.TLSSocket
+): void {
+  if (write.generation !== generation || activeSocket !== controlSocket) return
+  controlSendInFlight = false
+  controlSendQueue = []
+  if (write.keyFrameRequestCount > 0) {
+    sendingKeyFrameRequestCount = observedKeyFrameRequests
+  }
+  postStatus(write.failureCode)
+}
+
+function drainControlWrites(): void {
+  if (controlSendInFlight || controlSocket === undefined) return
+  while (controlSendQueue.length > 0 && controlSendQueue[0].generation !== generation) {
+    controlSendQueue.shift()
+  }
+  if (controlSendQueue.length === 0 || controlSocket === undefined) return
+  const activeSocket: socket.TLSSocket = controlSocket
+  const write: PendingControlWrite | undefined = controlSendQueue.shift()
+  if (write === undefined) return
+  controlSendInFlight = true
+  try {
+    activeSocket.send(write.data).then(() => {
+      if (write.generation !== generation || activeSocket !== controlSocket) return
+      controlSendInFlight = false
+      if (write.keyFrameRequestCount > 0) {
+        observedKeyFrameRequests = Math.max(
+          observedKeyFrameRequests, write.keyFrameRequestCount
+        )
+        sendingKeyFrameRequestCount = observedKeyFrameRequests
+      }
+      drainControlWrites()
+    }).catch(() => failControlWrite(write, activeSocket))
+  } catch (error) {
+    failControlWrite(write, activeSocket)
+  }
+}
+
+function enqueueControlWrite(
+  data: ArrayBuffer,
+  activeGeneration: number,
+  failureCode: string,
+  coalesceKey: string = '',
+  keyFrameRequestCount: number = 0
+): void {
+  if (activeGeneration !== generation || controlSocket === undefined) return
+  const write: PendingControlWrite = {
+    data: data,
+    generation: activeGeneration,
+    failureCode: failureCode,
+    coalesceKey: coalesceKey,
+    keyFrameRequestCount: keyFrameRequestCount
+  }
+  // 只合并连续同类消息，不能越过 leftDown/leftUp 等顺序边界。
+  const lastIndex: number = controlSendQueue.length - 1
+  if (coalesceKey.length > 0 && lastIndex >= 0
+    && controlSendQueue[lastIndex].coalesceKey === coalesceKey) {
+    controlSendQueue[lastIndex] = write
+    drainControlWrites()
+    return
+  }
+  if (controlSendQueue.length >= CONTROL_SEND_QUEUE_LIMIT) {
+    let removableIndex: number = -1
+    for (let index: number = 0; index < controlSendQueue.length; index += 1) {
+      if (controlSendQueue[index].coalesceKey.length > 0) {
+        removableIndex = index
+        break
+      }
+    }
+    if (removableIndex >= 0) {
+      controlSendQueue.splice(removableIndex, 1)
+    } else {
+      postStatus('NET_PROTOCOL_MISMATCH: control send queue overflow')
+      return
+    }
+  }
+  controlSendQueue.push(write)
+  drainControlWrites()
+}
+
 function sendClientHello(command: ConnectCommand, activeGeneration: number): void {
   if (activeGeneration !== generation || controlSocket === undefined) {
     return
@@ -187,9 +282,11 @@ function sendClientHello(command: ConnectCommand, activeGeneration: number): voi
     features: ['dynamicStreamV1', 'networkMigrationV1', 'multiDisplayV1'],
     videoTransports: ['tlsTcp']
   })
-  controlSocket.send(frameControlMessage(hello)).catch(() => {
-    if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: hello send failed')
-  })
+  enqueueControlWrite(
+    frameControlMessage(hello),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: hello send failed'
+  )
 }
 
 function postCursorPosition(message: ControlEnvelope, activeGeneration: number): void {
@@ -230,12 +327,12 @@ function sendHeartbeatAck(message: ControlEnvelope, activeGeneration: number): v
     sentAtUs: message.sentAtUs,
     receivedAtUs: Date.now() * 1000
   })
-  controlSocket.send(frameControlMessage(acknowledgement))
-    .catch(() => {
-      if (activeGeneration === generation) {
-        postStatus('NET_PROTOCOL_MISMATCH: heartbeat acknowledgement failed')
-      }
-    })
+  enqueueControlWrite(
+    frameControlMessage(acknowledgement),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: heartbeat acknowledgement failed',
+    'heartbeat'
+  )
 }
 
 function sendInputEvent(command: InputCommand, activeGeneration: number): void {
@@ -266,10 +363,14 @@ function sendInputEvent(command: InputCommand, activeGeneration: number): void {
     deltaX: deltaX,
     deltaY: deltaY
   })
-  controlSocket.send(frameControlMessage(message))
-    .catch(() => {
-      if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: input event send failed')
-    })
+  const coalesceKey: string = command.eventType === 'move' || command.eventType === 'drag'
+    ? 'pointer' : (command.eventType === 'scroll' ? 'scroll' : '')
+  enqueueControlWrite(
+    frameControlMessage(message),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: input event send failed',
+    coalesceKey
+  )
 }
 
 function sendGestureEvent(command: InputCommand, activeGeneration: number): void {
@@ -297,9 +398,11 @@ function sendGestureEvent(command: InputCommand, activeGeneration: number): void
     direction: command.direction,
     magnitude: command.magnitude
   })
-  controlSocket.send(frameControlMessage(message)).catch(() => {
-    if (activeGeneration === generation) postStatus('NET_PROTOCOL_MISMATCH: gesture event send failed')
-  })
+  enqueueControlWrite(
+    frameControlMessage(message),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: gesture event send failed'
+  )
 }
 
 function sendKeyFrameRequest(activeGeneration: number, nativeRequestCount: number): void {
@@ -316,15 +419,13 @@ function sendKeyFrameRequest(activeGeneration: number, nativeRequestCount: numbe
     sequence: keyFrameRequestSequence,
     reason: 'decoderRecovery'
   })
-  controlSocket.send(frameControlMessage(request)).then(() => {
-    if (activeGeneration !== generation) return
-    observedKeyFrameRequests = Math.max(observedKeyFrameRequests, nativeRequestCount)
-    sendingKeyFrameRequestCount = observedKeyFrameRequests
-  }).catch(() => {
-    if (activeGeneration !== generation) return
-    sendingKeyFrameRequestCount = observedKeyFrameRequests
-    postStatus('NET_PROTOCOL_MISMATCH: key frame request failed')
-  })
+  enqueueControlWrite(
+    frameControlMessage(request),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: key frame request failed',
+    '',
+    nativeRequestCount
+  )
 }
 
 function sendReceiverFeedback(command: ReceiverFeedbackCommand, activeGeneration: number): void {
@@ -340,11 +441,12 @@ function sendReceiverFeedback(command: ReceiverFeedbackCommand, activeGeneration
     renderedFramesPerSecond: Math.max(0, Math.min(command.renderedFramesPerSecond, 240)),
     networkType: command.networkType.length > 0 ? command.networkType : 'unknown'
   })
-  controlSocket.send(frameControlMessage(feedback)).catch(() => {
-    if (activeGeneration === generation) {
-      postStatus('NET_PROTOCOL_MISMATCH: receiver feedback send failed')
-    }
-  })
+  enqueueControlWrite(
+    frameControlMessage(feedback),
+    activeGeneration,
+    'NET_PROTOCOL_MISMATCH: receiver feedback send failed',
+    'feedback'
+  )
 }
 
 function handleControlPayload(payload: Uint8Array, activeGeneration: number): void {
@@ -434,6 +536,8 @@ async function closeSockets(activeGeneration: number): Promise<void> {
   inputSequence = 0
   lastCursorSequence = -1
   controlBuffer = new Uint8Array(0)
+  controlSendQueue = []
+  controlSendInFlight = false
   if (oldControl !== undefined) {
     oldControl.off('message')
     oldControl.off('close')

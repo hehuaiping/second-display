@@ -33,7 +33,7 @@ let package = Package(
         ),
         .target(
             name: "CapturePipeline",
-            dependencies: ["SecondDisplayCore", "VirtualDisplayCore"],
+            dependencies: ["SecondDisplayCore", "SharedProtocol", "VirtualDisplayCore"],
             path: "macos/CapturePipeline",
             linkerSettings: [
                 .linkedFramework("CoreGraphics"),

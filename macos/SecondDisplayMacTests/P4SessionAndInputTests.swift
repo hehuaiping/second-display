@@ -227,6 +227,11 @@ final class P4SessionAndInputTests: XCTestCase {
         XCTAssertEqual(authorization.requestCount, 1)
         XCTAssertFalse(controller.requestFromUserAction())
         XCTAssertEqual(authorization.requestCount, 1)
+
+        // 新应用进程会创建新控制器；ad-hoc 更新导致旧 TCC 条目失效时必须能重新注册。
+        let relaunchedController = ScreenCapturePermissionController(authorization: authorization)
+        XCTAssertTrue(relaunchedController.requestFromUserAction())
+        XCTAssertEqual(authorization.requestCount, 2)
     }
 }
 

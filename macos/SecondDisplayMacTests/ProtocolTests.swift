@@ -161,6 +161,28 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(try VideoFrameCodec().decode(encoded), frame)
     }
 
+    func testVideoFrameReusesValidatedPreframedStorage() throws {
+        let payload = Data([0, 0, 0, 1, 0x65])
+        let logical = VideoFrame(
+            frameType: .video,
+            flags: [.keyframe],
+            sequence: 9,
+            ptsUs: 10_000,
+            captureUs: 9_000,
+            payload: payload)
+        let expected = try VideoFrameCodec().encode(logical)
+        let preframed = VideoFrame(
+            frameType: logical.frameType,
+            flags: logical.flags,
+            sequence: logical.sequence,
+            ptsUs: logical.ptsUs,
+            captureUs: logical.captureUs,
+            payload: payload,
+            preframedData: expected)
+        XCTAssertEqual(try VideoFrameCodec().encode(preframed), expected)
+        XCTAssertEqual(try VideoFrameCodec().decode(expected), preframed)
+    }
+
     func testVideoFrameRejectsBadMagicTruncationAndOversizedPayload() throws {
         let valid = try TestSupport.data(
             hex: "53445331010100010000002a00000000000f424000000000000dbba0000000050000000165"

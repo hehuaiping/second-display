@@ -353,7 +353,8 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                         sequence: encoded.sequence,
                         ptsUs: encoded.presentationTimeStampUs,
                         captureUs: encoded.captureTimestampUs,
-                        payload: encoded.payload
+                        payload: encoded.payload,
+                        preframedData: encoded.preframedData
                     )
                     let result = await createdVideoChannel.send(frame)
                     if result.requiresKeyFrame { await pipeline.requestKeyFrame() }

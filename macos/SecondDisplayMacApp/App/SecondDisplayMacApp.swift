@@ -158,7 +158,7 @@ private struct HostServiceView: View {
                     }
                     Text(
                         "Permission prompts appear only after you click a request button. "
-                            + "If access is declined, the button opens System Settings instead of asking again."
+                            + "Screen Recording is registered with macOS before System Settings opens."
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -279,13 +279,9 @@ private final class HostServiceModel: ObservableObject {
     private var latestGeneration: UInt64 = 0
     private var eventHistory: [P3HostEvent] = []
     private var latestSelfTest: P3DiagnosticSelfTestResult?
-    private static let screenCapturePromptKey = "SecondDisplay.ScreenCapturePromptIssued"
     private static let accessibilityPromptKey = "SecondDisplay.AccessibilityPromptIssued"
 
     private init() {
-        screenCaptureRequestIssued = UserDefaults.standard.bool(
-            forKey: Self.screenCapturePromptKey
-        )
         accessibilityRequestIssued = UserDefaults.standard.bool(
             forKey: Self.accessibilityPromptKey
         )
@@ -388,12 +384,9 @@ private final class HostServiceModel: ObservableObject {
     func requestScreenCapturePermission() {
         refreshPermissions()
         guard !screenCaptureAllowed else { return }
-        guard !screenCaptureRequestIssued else {
-            openScreenRecordingSettings()
-            return
-        }
+        // ad-hoc 应用更新后，TCC 可能移除旧代码身份的条目，但 UserDefaults 会继续保留。
+        // 因此录屏请求只在当前进程内去重，每次新启动都先调用系统请求 API 完成注册。
         screenCaptureRequestIssued = true
-        UserDefaults.standard.set(true, forKey: Self.screenCapturePromptKey)
         _ = screenCapturePermission.requestFromUserAction()
         refreshPermissions()
         if screenCaptureAllowed {
@@ -402,6 +395,7 @@ private final class HostServiceModel: ObservableObject {
             recentErrorCode = SessionErrorCode.capPermissionDenied.rawValue
             statusMessage =
                 "CAP_PERMISSION_DENIED: enable Screen Recording in System Settings, then return"
+            openScreenRecordingSettings()
         }
     }
 
