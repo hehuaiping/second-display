@@ -377,9 +377,14 @@ final class MediaPipelineTests: XCTestCase {
     }
 
     func testPreEncodeAgeGateDropsOldCaptureAndSendsFreshIDR() async throws {
+        let nowUs: UInt64 = 1_000_000
         let encoder = FakeVideoEncoder(delayNanoseconds: 0, payloadBytes: 128)
         let metrics = MediaPipelineMetrics()
-        let pipeline = CaptureEncoderPipeline(videoEncoder: encoder, metrics: metrics)
+        let pipeline = CaptureEncoderPipeline(
+            videoEncoder: encoder,
+            metrics: metrics,
+            monotonicMicroseconds: { nowUs }
+        )
         let output = EncodedFrameRecorder()
         let pair = AsyncThrowingStream<CapturedFrame, Error>.makeStream(bufferingPolicy: .unbounded)
         try await pipeline.start(
@@ -390,8 +395,13 @@ final class MediaPipelineTests: XCTestCase {
             onEncodedFrame: { frame in await output.append(frame) }
         )
 
-        let source = try makeFrame(width: 64, height: 64, sequence: 0, generation: 17)
-        let nowUs = MediaClock.monotonicMicroseconds()
+        let source = try makeFrame(
+            width: 64,
+            height: 64,
+            sequence: 0,
+            generation: 17,
+            callbackTimestampUs: nowUs
+        )
         let stale = CapturedFrame(
             pixelBuffer: source.pixelBuffer,
             presentationTimeStamp: source.presentationTimeStamp,
@@ -401,7 +411,14 @@ final class MediaPipelineTests: XCTestCase {
             generation: source.generation
         )
         pair.continuation.yield(stale)
-        pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 17))
+        pair.continuation.yield(
+            try makeFrame(
+                width: 64,
+                height: 64,
+                sequence: 1,
+                generation: 17,
+                callbackTimestampUs: nowUs
+            ))
         pair.continuation.finish()
         try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
@@ -415,9 +432,14 @@ final class MediaPipelineTests: XCTestCase {
     }
 
     func testCaptureTimestampAgeGateDropsWindowServerBacklog() async throws {
+        let nowUs: UInt64 = 1_000_000
         let encoder = FakeVideoEncoder(delayNanoseconds: 0, payloadBytes: 128)
         let metrics = MediaPipelineMetrics()
-        let pipeline = CaptureEncoderPipeline(videoEncoder: encoder, metrics: metrics)
+        let pipeline = CaptureEncoderPipeline(
+            videoEncoder: encoder,
+            metrics: metrics,
+            monotonicMicroseconds: { nowUs }
+        )
         let output = EncodedFrameRecorder()
         let pair = AsyncThrowingStream<CapturedFrame, Error>.makeStream(bufferingPolicy: .unbounded)
         try await pipeline.start(
@@ -428,8 +450,13 @@ final class MediaPipelineTests: XCTestCase {
             onEncodedFrame: { frame in await output.append(frame) }
         )
 
-        let source = try makeFrame(width: 64, height: 64, sequence: 0, generation: 18)
-        let nowUs = MediaClock.monotonicMicroseconds()
+        let source = try makeFrame(
+            width: 64,
+            height: 64,
+            sequence: 0,
+            generation: 18,
+            callbackTimestampUs: nowUs
+        )
         let stale = CapturedFrame(
             pixelBuffer: source.pixelBuffer,
             presentationTimeStamp: source.presentationTimeStamp,
@@ -439,7 +466,14 @@ final class MediaPipelineTests: XCTestCase {
             generation: source.generation
         )
         pair.continuation.yield(stale)
-        pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 18))
+        pair.continuation.yield(
+            try makeFrame(
+                width: 64,
+                height: 64,
+                sequence: 1,
+                generation: 18,
+                callbackTimestampUs: nowUs
+            ))
         pair.continuation.finish()
         try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
