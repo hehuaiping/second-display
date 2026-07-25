@@ -1,15 +1,23 @@
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*.*.*"
+      - "V*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build, for example v1.0.0
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -18,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
+      commit: ${{ steps.reference.outputs.commit }}
       version: ${{ steps.metadata.outputs.version }}
       release_label: ${{ steps.metadata.outputs.release_label }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
@@ -26,28 +35,85 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
       - name: Require tag commit on main
+        id: reference
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          git fetch --tags --prune origin
           git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+          if ! TAG_COMMIT="$(git rev-parse --verify \
+            "refs/tags/${REQUESTED_TAG}^{commit}")"; then
+            echo "Release tag ${REQUESTED_TAG} does not exist" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
             echo "Release tag must point to a commit contained in main" >&2
             exit 1
           fi
+          {
+            echo "tag=${REQUESTED_TAG}"
+            echo "commit=${TAG_COMMIT}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Test release metadata tooling
         run: python3 -m unittest discover -s tools/release -p "test_*.py"
       - name: Validate tag and project versions
         id: metadata
+        env:
+          REQUESTED_TAG: ${{ steps.reference.outputs.tag }}
         run: |
+          VALIDATION_TAG="${REQUESTED_TAG}"
+          if [[ "${VALIDATION_TAG}" == V* ]]; then
+            VALIDATION_TAG="v${VALIDATION_TAG:1}"
+          fi
           python3 tools/release/prepare_release.py \
-            --tag "${GITHUB_REF_NAME}" \
+            --tag "${VALIDATION_TAG}" \
             --github-output "${GITHUB_OUTPUT}"
+          echo "tag=${REQUESTED_TAG}" >> "${GITHUB_OUTPUT}"
+
+  release-preflight:
+    name: Validate release credentials
+    needs: validate
+    runs-on: ubuntu-24.04
+    environment: release
+    steps:
+      - name: Require Developer ID and notarization credentials
+        env:
+          CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
+          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
+          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
+          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+        run: |
+          missing=()
+          [[ -n "${CERTIFICATE_BASE64}" ]] ||
+            missing+=("MACOS_DEVELOPER_ID_P12_BASE64")
+          [[ -n "${CERTIFICATE_PASSWORD}" ]] ||
+            missing+=("MACOS_DEVELOPER_ID_P12_PASSWORD")
+          [[ -n "${SIGN_IDENTITY}" ]] ||
+            missing+=("MACOS_SIGN_IDENTITY")
+          [[ -n "${NOTARY_KEY_BASE64}" ]] ||
+            missing+=("APPLE_NOTARY_KEY_P8_BASE64")
+          [[ -n "${NOTARY_KEY_ID}" ]] ||
+            missing+=("APPLE_NOTARY_KEY_ID")
+          [[ -n "${NOTARY_ISSUER_ID}" ]] ||
+            missing+=("APPLE_NOTARY_ISSUER_ID")
+          if ((${#missing[@]} > 0)); then
+            echo "Missing release Environment secrets:" >&2
+            printf '  - %s\n' "${missing[@]}" >&2
+            exit 1
+          fi
 
   macos-quality:
     name: macOS quality gate
-    needs: validate
+    needs: [validate, release-preflight]
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Validate shared vectors
         run: python3 tools/validate_shared_vectors.py
       - name: Run Debug tests
@@ -66,10 +132,12 @@ jobs:
 
   harmony-quality:
     name: HarmonyOS protocol quality gate
-    needs: validate
+    needs: [validate, release-preflight]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Configure protocol tests
         run: >
           cmake -S harmony/entry/src/main/cpp
@@ -83,7 +151,7 @@ jobs:
 
   macos-package:
     name: Sign and notarize macOS DMG
-    needs: [validate, macos-quality, harmony-quality]
+    needs: [validate, release-preflight, macos-quality, harmony-quality]
     runs-on: macos-15
     environment: release
     permissions:
@@ -92,6 +160,8 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Require release credentials
         env:
           CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
@@ -186,6 +256,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           HARMONY_VERSION_CODE: ${{ needs.validate.outputs.harmony_version_code }}
         run: |
           mkdir -p release-assets
@@ -200,7 +271,7 @@ jobs:
           information = {
               "tag": os.environ["RELEASE_TAG"],
               "version": os.environ["RELEASE_VERSION"],
-              "commit": os.environ["GITHUB_SHA"],
+              "commit": os.environ["RELEASE_COMMIT"],
               "runId": os.environ["GITHUB_RUN_ID"],
               "harmonyVersionCode": int(os.environ["HARMONY_VERSION_CODE"]),
           }
@@ -238,6 +309,8 @@ jobs:
     runs-on: [self-hosted, harmonyos-build]
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Prepare unsigned build configuration
         run: |
           if rg -n '"signingConfigs?"|"material"|"storeFile"|"profile"' \
@@ -269,6 +342,7 @@ jobs:
     if: >-
       always() &&
       needs.validate.result == 'success' &&
+      needs.release-preflight.result == 'success' &&
       needs.macos-quality.result == 'success' &&
       needs.harmony-quality.result == 'success' &&
       needs.macos-package.result == 'success' &&
@@ -276,6 +350,7 @@ jobs:
        needs.harmony-build.result == 'skipped')
     needs:
       - validate
+      - release-preflight
       - macos-quality
       - harmony-quality
       - macos-package

@@ -10,7 +10,7 @@ from pathlib import Path
 
 
 TAG_PATTERN = re.compile(
-    r"^v(?P<major>0|[1-9]\d*)\."
+    r"^[vV](?P<major>0|[1-9]\d*)\."
     r"(?P<minor>0|[1-9]\d*)\."
     r"(?P<patch>0|[1-9]\d*)"
     r"(?:-(?P<prerelease>[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$"
@@ -32,8 +32,8 @@ def parse_tag(tag: str) -> tuple[str, str, bool]:
     match = TAG_PATTERN.fullmatch(tag)
     if match is None:
         raise ValueError(
-            "release tag must use vMAJOR.MINOR.PATCH or "
-            "vMAJOR.MINOR.PATCH-prerelease"
+            "release tag must use vMAJOR.MINOR.PATCH, "
+            "VMAJOR.MINOR.PATCH, or their prerelease form"
         )
     version = ".".join(
         (match.group("major"), match.group("minor"), match.group("patch"))

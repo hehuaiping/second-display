@@ -21,6 +21,8 @@ Pull Request 上发布制品。
 v1.2.3
 ```
 
+兼容使用大写前缀的已有标签，例如 `V1.2.3`；新版本仍建议统一使用小写 `v`。
+
 预发布标签：
 
 ```text
@@ -51,6 +53,9 @@ reviewers，确保正式签名和公证作业需要人工批准。
 | `APPLE_NOTARY_KEY_P8_BASE64` | App Store Connect API Key `.p8`，Base64 编码 |
 | `APPLE_NOTARY_KEY_ID` | App Store Connect API Key ID |
 | `APPLE_NOTARY_ISSUER_ID` | App Store Connect Issuer ID |
+
+发布流水线会先执行凭据预检；任一 Secret 缺失时会直接列出缺失名称并停止，不再继续占用
+macOS Runner 执行测试和打包。
 
 Base64 文件可以在本机生成，输出只粘贴到 GitHub Secret，不能写入仓库：
 
@@ -94,6 +99,10 @@ git push origin v1.2.3
 4. 可选的 HarmonyOS debug HAP 编译验证。
 5. 创建 Draft Release、上传全部制品和校验和。
 6. 所有上传成功后才发布 Release。
+
+若标签已经存在但没有触发流水线，或需要在修复流水线后重试，可在 GitHub Actions 的
+`Release` 工作流中选择 `Run workflow`，输入完整标签名。手动运行仍会校验标签存在、
+版本匹配且标签提交位于 `main`，并且所有作业都会检出该标签对应的同一个提交。
 
 如签名、公证或任一质量门禁失败，不会生成公开 Release。重新运行失败作业时，只允许
 继续更新尚未发布的 Draft Release；已发布 Release 不会被自动覆盖。

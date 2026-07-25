@@ -23,6 +23,9 @@ class ReleaseMetadataTests(unittest.TestCase):
             ("2.0.0", "2.0.0-beta.1", True),
         )
 
+    def test_uppercase_prefix_is_accepted(self) -> None:
+        self.assertEqual(parse_tag("V1.2.3"), ("1.2.3", "1.2.3", False))
+
     def test_rejects_non_semantic_tag(self) -> None:
         with self.assertRaises(ValueError):
             parse_tag("release-1.2")
