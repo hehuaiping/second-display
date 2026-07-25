@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
-APP_VERSION=${APP_VERSION:-1.0.0}
+APP_VERSION=${APP_VERSION:-1.0.1}
 APP_BUILD_NUMBER=${APP_BUILD_NUMBER:-1}
 RELEASE_LABEL=${RELEASE_LABEL:-$APP_VERSION}
 SIGN_IDENTITY=${MACOS_SIGN_IDENTITY:--}
@@ -118,7 +118,11 @@ elif [[ -n "${NOTARY_KEYCHAIN_PROFILE:-}" ]]; then
     xcrun stapler staple "$DMG_PATH"
     xcrun stapler validate "$DMG_PATH"
 else
-    print "Notarization skipped; set NOTARY_KEYCHAIN_PROFILE for release distribution"
+    if [[ "$SIGN_IDENTITY" == "-" ]]; then
+        print "Notarization skipped for ad-hoc distribution"
+    else
+        print "Notarization skipped; set NOTARY_KEYCHAIN_PROFILE for Developer ID distribution"
+    fi
 fi
 
 print "Created $APP_BUNDLE"

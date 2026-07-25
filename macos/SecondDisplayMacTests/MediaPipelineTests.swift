@@ -377,9 +377,14 @@ final class MediaPipelineTests: XCTestCase {
     }
 
     func testPreEncodeAgeGateDropsOldCaptureAndSendsFreshIDR() async throws {
+        let nowUs: UInt64 = 1_000_000
         let encoder = FakeVideoEncoder(delayNanoseconds: 0, payloadBytes: 128)
         let metrics = MediaPipelineMetrics()
-        let pipeline = CaptureEncoderPipeline(videoEncoder: encoder, metrics: metrics)
+        let pipeline = CaptureEncoderPipeline(
+            videoEncoder: encoder,
+            metrics: metrics,
+            monotonicMicroseconds: { nowUs }
+        )
         let output = EncodedFrameRecorder()
         let pair = AsyncThrowingStream<CapturedFrame, Error>.makeStream(bufferingPolicy: .unbounded)
         try await pipeline.start(
@@ -390,8 +395,13 @@ final class MediaPipelineTests: XCTestCase {
             onEncodedFrame: { frame in await output.append(frame) }
         )
 
-        let source = try makeFrame(width: 64, height: 64, sequence: 0, generation: 17)
-        let nowUs = MediaClock.monotonicMicroseconds()
+        let source = try makeFrame(
+            width: 64,
+            height: 64,
+            sequence: 0,
+            generation: 17,
+            callbackTimestampUs: nowUs
+        )
         let stale = CapturedFrame(
             pixelBuffer: source.pixelBuffer,
             presentationTimeStamp: source.presentationTimeStamp,
@@ -401,24 +411,35 @@ final class MediaPipelineTests: XCTestCase {
             generation: source.generation
         )
         pair.continuation.yield(stale)
-        pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 17))
+        pair.continuation.yield(
+            try makeFrame(
+                width: 64,
+                height: 64,
+                sequence: 1,
+                generation: 17,
+                callbackTimestampUs: nowUs
+            ))
         pair.continuation.finish()
-        for _ in 0..<100 where await output.frames.isEmpty {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
 
         let snapshot = await metrics.snapshot()
         let frames = await output.frames
+        let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
         XCTAssertEqual(frames.count, 1)
-        XCTAssertTrue(frames[0].isKeyFrame)
+        XCTAssertTrue(frame.isKeyFrame)
     }
 
     func testCaptureTimestampAgeGateDropsWindowServerBacklog() async throws {
+        let nowUs: UInt64 = 1_000_000
         let encoder = FakeVideoEncoder(delayNanoseconds: 0, payloadBytes: 128)
         let metrics = MediaPipelineMetrics()
-        let pipeline = CaptureEncoderPipeline(videoEncoder: encoder, metrics: metrics)
+        let pipeline = CaptureEncoderPipeline(
+            videoEncoder: encoder,
+            metrics: metrics,
+            monotonicMicroseconds: { nowUs }
+        )
         let output = EncodedFrameRecorder()
         let pair = AsyncThrowingStream<CapturedFrame, Error>.makeStream(bufferingPolicy: .unbounded)
         try await pipeline.start(
@@ -429,8 +450,13 @@ final class MediaPipelineTests: XCTestCase {
             onEncodedFrame: { frame in await output.append(frame) }
         )
 
-        let source = try makeFrame(width: 64, height: 64, sequence: 0, generation: 18)
-        let nowUs = MediaClock.monotonicMicroseconds()
+        let source = try makeFrame(
+            width: 64,
+            height: 64,
+            sequence: 0,
+            generation: 18,
+            callbackTimestampUs: nowUs
+        )
         let stale = CapturedFrame(
             pixelBuffer: source.pixelBuffer,
             presentationTimeStamp: source.presentationTimeStamp,
@@ -440,18 +466,24 @@ final class MediaPipelineTests: XCTestCase {
             generation: source.generation
         )
         pair.continuation.yield(stale)
-        pair.continuation.yield(try makeFrame(width: 64, height: 64, sequence: 1, generation: 18))
+        pair.continuation.yield(
+            try makeFrame(
+                width: 64,
+                height: 64,
+                sequence: 1,
+                generation: 18,
+                callbackTimestampUs: nowUs
+            ))
         pair.continuation.finish()
-        for _ in 0..<100 where await output.frames.isEmpty {
-            try await Task.sleep(nanoseconds: 1_000_000)
-        }
+        try await waitForFrameCount(1, recorder: output)
         await pipeline.stop()
 
         let snapshot = await metrics.snapshot()
         let frames = await output.frames
+        let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
         XCTAssertEqual(frames.count, 1)
-        XCTAssertTrue(frames[0].isKeyFrame)
+        XCTAssertTrue(frame.isKeyFrame)
     }
 
     func testExplicitDecoderRecoveryRequestForcesNextIDR() async throws {
@@ -768,13 +800,19 @@ private func makeFrame(
 
 private func waitForFrameCount(
     _ expectedCount: Int,
-    recorder: EncodedFrameRecorder
+    recorder: EncodedFrameRecorder,
+    timeout: Duration = .seconds(2)
 ) async throws {
-    for _ in 0..<100 {
+    let clock = ContinuousClock()
+    let deadline = clock.now.advanced(by: timeout)
+    while clock.now < deadline {
         if await recorder.frames.count >= expectedCount { return }
         try await Task.sleep(for: .milliseconds(1))
     }
-    XCTFail("Timed out waiting for \(expectedCount) encoded frames")
+    throw SessionError(
+        code: .capStreamStopped,
+        detail: "Timed out waiting for \(expectedCount) encoded frames"
+    )
 }
 
 private func awaitValue(

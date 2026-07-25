@@ -20,11 +20,23 @@ public actor CaptureEncoderPipeline {
 
     private let videoEncoder: any VideoEncoding
     private let metrics: MediaPipelineMetrics
+    private let monotonicMicroseconds: @Sendable () -> UInt64
     private var active: ActivePipeline?
 
     public init(videoEncoder: any VideoEncoding, metrics: MediaPipelineMetrics = MediaPipelineMetrics()) {
         self.videoEncoder = videoEncoder
         self.metrics = metrics
+        self.monotonicMicroseconds = MediaClock.monotonicMicroseconds
+    }
+
+    init(
+        videoEncoder: any VideoEncoding,
+        metrics: MediaPipelineMetrics = MediaPipelineMetrics(),
+        monotonicMicroseconds: @escaping @Sendable () -> UInt64
+    ) {
+        self.videoEncoder = videoEncoder
+        self.metrics = metrics
+        self.monotonicMicroseconds = monotonicMicroseconds
     }
 
     public func start(
@@ -46,6 +58,7 @@ public actor CaptureEncoderPipeline {
         let framePair = AsyncStream<CapturedFrame>.makeStream(bufferingPolicy: .bufferingNewest(1))
         let metrics = self.metrics
         let videoEncoder = self.videoEncoder
+        let monotonicMicroseconds = self.monotonicMicroseconds
         let frameDurationUs = UInt64(
             (1_000_000 + encoderConfiguration.framesPerSecond - 1)
                 / encoderConfiguration.framesPerSecond)
@@ -57,7 +70,7 @@ public actor CaptureEncoderPipeline {
                 for try await frame in frames {
                     try Task.checkCancellation()
                     guard frame.generation == generation else { throw CancellationError() }
-                    let nowUs = MediaClock.monotonicMicroseconds()
+                    let nowUs = monotonicMicroseconds()
                     let callbackAgeUs =
                         nowUs >= frame.callbackTimestampUs
                         ? nowUs - frame.callbackTimestampUs : 0

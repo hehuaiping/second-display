@@ -1,15 +1,23 @@
 name: Release
+run-name: Release ${{ inputs.tag || github.ref_name }}
 
 on:
   push:
     tags:
       - "v*.*.*"
+      - "V*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing release tag to build, for example v1.0.0
+        required: true
+        type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 jobs:
@@ -18,6 +26,7 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       tag: ${{ steps.metadata.outputs.tag }}
+      commit: ${{ steps.reference.outputs.commit }}
       version: ${{ steps.metadata.outputs.version }}
       release_label: ${{ steps.metadata.outputs.release_label }}
       prerelease: ${{ steps.metadata.outputs.prerelease }}
@@ -26,21 +35,42 @@ jobs:
       - uses: actions/checkout@v6
         with:
           fetch-depth: 0
+          ref: ${{ inputs.tag || github.ref }}
       - name: Require tag commit on main
+        id: reference
+        env:
+          REQUESTED_TAG: ${{ inputs.tag || github.ref_name }}
         run: |
+          git fetch --tags --prune origin
           git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor "${GITHUB_SHA}" origin/main; then
+          if ! TAG_COMMIT="$(git rev-parse --verify \
+            "refs/tags/${REQUESTED_TAG}^{commit}")"; then
+            echo "Release tag ${REQUESTED_TAG} does not exist" >&2
+            exit 1
+          fi
+          if ! git merge-base --is-ancestor "${TAG_COMMIT}" origin/main; then
             echo "Release tag must point to a commit contained in main" >&2
             exit 1
           fi
+          {
+            echo "tag=${REQUESTED_TAG}"
+            echo "commit=${TAG_COMMIT}"
+          } >> "${GITHUB_OUTPUT}"
       - name: Test release metadata tooling
         run: python3 -m unittest discover -s tools/release -p "test_*.py"
       - name: Validate tag and project versions
         id: metadata
+        env:
+          REQUESTED_TAG: ${{ steps.reference.outputs.tag }}
         run: |
+          VALIDATION_TAG="${REQUESTED_TAG}"
+          if [[ "${VALIDATION_TAG}" == V* ]]; then
+            VALIDATION_TAG="v${VALIDATION_TAG:1}"
+          fi
           python3 tools/release/prepare_release.py \
-            --tag "${GITHUB_REF_NAME}" \
+            --tag "${VALIDATION_TAG}" \
             --github-output "${GITHUB_OUTPUT}"
+          echo "tag=${REQUESTED_TAG}" >> "${GITHUB_OUTPUT}"
 
   macos-quality:
     name: macOS quality gate
@@ -48,6 +78,8 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Validate shared vectors
         run: python3 tools/validate_shared_vectors.py
       - name: Run Debug tests
@@ -70,6 +102,8 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Configure protocol tests
         run: >
           cmake -S harmony/entry/src/main/cpp
@@ -82,7 +116,7 @@ jobs:
         run: ctest --test-dir .build/harmony-host --output-on-failure
 
   macos-package:
-    name: Sign and notarize macOS DMG
+    name: Build ad-hoc signed macOS DMG
     needs: [validate, macos-quality, harmony-quality]
     runs-on: macos-15
     environment: release
@@ -92,93 +126,24 @@ jobs:
       attestations: write
     steps:
       - uses: actions/checkout@v6
-      - name: Require release credentials
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-          SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
-          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
-        run: |
-          for variable in \
-            CERTIFICATE_BASE64 CERTIFICATE_PASSWORD SIGN_IDENTITY \
-            NOTARY_KEY_BASE64 NOTARY_KEY_ID NOTARY_ISSUER_ID
-          do
-            if [[ -z "${!variable}" ]]; then
-              echo "Missing required release secret: ${variable}" >&2
-              exit 1
-            fi
-          done
-      - name: Import Developer ID certificate
-        env:
-          CERTIFICATE_BASE64: ${{ secrets.MACOS_DEVELOPER_ID_P12_BASE64 }}
-          CERTIFICATE_PASSWORD: ${{ secrets.MACOS_DEVELOPER_ID_P12_PASSWORD }}
-        run: |
-          KEYCHAIN_PATH="${RUNNER_TEMP}/second-display-release.keychain-db"
-          KEYCHAIN_PASSWORD="$(openssl rand -hex 24)"
-          CERTIFICATE_PATH="${RUNNER_TEMP}/developer-id.p12"
-          python3 - <<'PY'
-          import base64
-          import os
-          from pathlib import Path
-
-          Path(os.environ["RUNNER_TEMP"], "developer-id.p12").write_bytes(
-              base64.b64decode(os.environ["CERTIFICATE_BASE64"], validate=True)
-          )
-          PY
-          security create-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
-          security set-keychain-settings -lut 21600 "${KEYCHAIN_PATH}"
-          security unlock-keychain -p "${KEYCHAIN_PASSWORD}" "${KEYCHAIN_PATH}"
-          security import "${CERTIFICATE_PATH}" \
-            -k "${KEYCHAIN_PATH}" \
-            -P "${CERTIFICATE_PASSWORD}" \
-            -T /usr/bin/codesign \
-            -T /usr/bin/security
-          security set-key-partition-list \
-            -S apple-tool:,apple: \
-            -s \
-            -k "${KEYCHAIN_PASSWORD}" \
-            "${KEYCHAIN_PATH}"
-          security list-keychains -d user -s "${KEYCHAIN_PATH}"
-          {
-            echo "MACOS_CI_KEYCHAIN=${KEYCHAIN_PATH}"
-            echo "MACOS_CI_KEYCHAIN_PASSWORD=${KEYCHAIN_PASSWORD}"
-          } >> "${GITHUB_ENV}"
-      - name: Prepare App Store Connect notary key
-        env:
-          NOTARY_KEY_BASE64: ${{ secrets.APPLE_NOTARY_KEY_P8_BASE64 }}
-        run: |
-          python3 - <<'PY'
-          import base64
-          import os
-          from pathlib import Path
-
-          key_path = Path(os.environ["RUNNER_TEMP"], "notary-api-key.p8")
-          key_path.write_bytes(
-              base64.b64decode(os.environ["NOTARY_KEY_BASE64"], validate=True)
-          )
-          key_path.chmod(0o600)
-          with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as output:
-              output.write(f"NOTARY_KEY_PATH={key_path}\n")
-          PY
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Detect package architecture
         id: platform
         run: echo "architecture=$(uname -m)" >> "${GITHUB_OUTPUT}"
-      - name: Build, sign, and notarize DMG
+      - name: Build ad-hoc signed DMG
         env:
           APP_VERSION: ${{ needs.validate.outputs.version }}
           RELEASE_LABEL: ${{ needs.validate.outputs.release_label }}
           APP_BUILD_NUMBER: ${{ github.run_number }}
-          MACOS_SIGN_IDENTITY: ${{ secrets.MACOS_SIGN_IDENTITY }}
-          NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
-          NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          MACOS_SIGN_IDENTITY: "-"
           INSTALL_LOCAL_PAIRING_IDENTITY: "0"
         run: tools/package_macos_dmg.sh
-      - name: Verify notarized distribution
+      - name: Verify ad-hoc distribution
         env:
-          REQUIRE_GATEKEEPER: "1"
-          REQUIRE_NOTARIZATION: "1"
+          REQUIRE_ADHOC: "1"
+          REQUIRE_GATEKEEPER: "0"
+          REQUIRE_NOTARIZATION: "0"
         run: >
           tools/verify_macos_distribution.sh
           "dist/SecondDisplay-${{ needs.validate.outputs.release_label }}-macos-${{ steps.platform.outputs.architecture }}.dmg"
@@ -186,6 +151,7 @@ jobs:
         env:
           RELEASE_TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_VERSION: ${{ needs.validate.outputs.version }}
+          RELEASE_COMMIT: ${{ needs.validate.outputs.commit }}
           HARMONY_VERSION_CODE: ${{ needs.validate.outputs.harmony_version_code }}
         run: |
           mkdir -p release-assets
@@ -200,9 +166,11 @@ jobs:
           information = {
               "tag": os.environ["RELEASE_TAG"],
               "version": os.environ["RELEASE_VERSION"],
-              "commit": os.environ["GITHUB_SHA"],
+              "commit": os.environ["RELEASE_COMMIT"],
               "runId": os.environ["GITHUB_RUN_ID"],
               "harmonyVersionCode": int(os.environ["HARMONY_VERSION_CODE"]),
+              "macosSigning": "ad-hoc",
+              "notarized": False,
           }
           Path("release-assets/BUILD-INFO.json").write_text(
               json.dumps(information, indent=2, sort_keys=True) + "\n",
@@ -224,13 +192,6 @@ jobs:
           path: release-assets/
           if-no-files-found: error
           retention-days: 14
-      - name: Remove temporary signing keychain
-        if: always()
-        run: |
-          if [[ -n "${MACOS_CI_KEYCHAIN:-}" ]]; then
-            security delete-keychain "${MACOS_CI_KEYCHAIN}" || true
-          fi
-
   harmony-build:
     name: Verify HarmonyOS application build
     if: vars.ENABLE_HARMONY_BUILD == 'true'
@@ -238,6 +199,8 @@ jobs:
     runs-on: [self-hosted, harmonyos-build]
     steps:
       - uses: actions/checkout@v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
       - name: Prepare unsigned build configuration
         run: |
           if rg -n '"signingConfigs?"|"material"|"storeFile"|"profile"' \
@@ -321,6 +284,7 @@ jobs:
               --repo "${GITHUB_REPOSITORY}"
               --title "Second Display ${RELEASE_VERSION}"
               --generate-notes
+              --notes $'> [!WARNING]\n> 此 DMG 使用 ad-hoc 签名且未经过 Apple 公证，不能通过标准 Gatekeeper 信任校验。\n> 请仅从本仓库 Release 下载，并核对 SHA-256 与 GitHub Artifact Attestation。\n>\n> This DMG is ad-hoc signed and not Apple-notarized, so it does not pass the standard Gatekeeper trust assessment.'
               --verify-tag
               --draft
             )

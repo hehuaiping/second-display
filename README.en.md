@@ -60,9 +60,10 @@ only when both peers expose a usable runtime API.
 - The receiver currently connects to `192.168.43.9:52340/52341` by default. If the Mac IP changes,
   the receiver configuration must be updated; service discovery or an editable address is future
   work.
-- Local DMGs use ad-hoc signing by default. macOS may ask for Screen Recording and Accessibility
-  permissions again after the binary changes. Stable distribution requires Developer ID signing
-  and real notarization testing.
+- Current GitHub Release DMGs use ad-hoc signing and are not Apple-notarized, so they do not pass
+  the standard Gatekeeper trust assessment. macOS may also ask for Screen Recording and
+  Accessibility permissions again after the binary changes. Download only from this repository
+  and verify the checksums and artifact attestation.
 - Clipboard, soft-keyboard, and shortcut channels are not implemented. The optional cursor side
   channel remains in the codebase, but the original captured Mac cursor is the default.
 
@@ -107,7 +108,7 @@ tools/package_macos_dmg.sh
 tools/verify_macos_distribution.sh
 ```
 
-For a Developer ID signed and notarized build:
+For a future Developer ID signed and notarized build:
 
 ```sh
 MACOS_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
@@ -132,11 +133,12 @@ Signing configuration is developer-local and must never be committed. See the
 ### GitHub Release
 
 Production releases are driven by `vMAJOR.MINOR.PATCH` tags. The workflow runs
-quality gates, Developer ID signing, Apple notarization, checksums, and artifact
-attestation before publishing the macOS DMG. HarmonyOS currently receives a
+quality gates, ad-hoc signing, DMG integrity checks, checksums, and artifact
+attestation before publishing the macOS DMG; current artifacts do not claim a
+Developer ID identity or Apple notarization. HarmonyOS currently receives a
 compile-only verification; it is neither signed nor uploaded as a release
-asset. See the [Tag-Driven Release process](docs/RELEASE_PROCESS.md) for
-credentials, the optional HarmonyOS build runner, and tagging instructions.
+asset. See the [Tag-Driven Release process](docs/RELEASE_PROCESS.md) for the
+optional HarmonyOS build runner and tagging instructions.
 
 ## Repository layout
 

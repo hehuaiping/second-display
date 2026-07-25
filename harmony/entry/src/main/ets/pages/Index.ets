@@ -1559,7 +1559,7 @@ struct Index {
             .fontSize(22)
             .fontWeight(FontWeight.Bold)
             .fontColor(Color.White)
-          Text('Second Display · 1.0.0')
+          Text('Second Display · 1.0.1')
             .fontSize(13)
             .fontColor('#BFD2EA')
           Text('开发者：何怀平')
