@@ -52,11 +52,23 @@ struct P3PoCHost {
         let maximumFramesPerSecond =
             ProcessInfo.processInfo.environment["P3_POC_MAX_FPS"]
             .flatMap(Int.init) ?? 60
+        let showsAnimatedTestPattern: Bool
+        switch ProcessInfo.processInfo.environment["P3_POC_ANIMATED_TEST_PATTERN"] {
+        case nil, "1":
+            showsAnimatedTestPattern = true
+        case "0":
+            showsAnimatedTestPattern = false
+        default:
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "P3_POC_ANIMATED_TEST_PATTERN must be 0 or 1"
+            )
+        }
         let configuration = P3HostConfiguration(
             identityData: identityData,
             identityPassword: password,
             durationSeconds: duration,
-            showsAnimatedTestPattern: true,
+            showsAnimatedTestPattern: showsAnimatedTestPattern,
             maximumFramesPerSecond: maximumFramesPerSecond
         )
         let service = P3HostService()

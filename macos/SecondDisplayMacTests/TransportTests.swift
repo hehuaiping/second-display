@@ -406,6 +406,122 @@ final class TransportTests: XCTestCase {
         XCTAssertLessThan(rebuild?.resolutionScale ?? 1, 1)
     }
 
+    func testNetworkAdaptationDoesNotTreatCaptureIdleAsReceiverCongestion() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let captureIdle = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 2,
+            senderFramesPerSecond: 3,
+            targetFramesPerSecond: 60
+        )
+        for _ in 0..<30 {
+            XCTAssertNil(controller.observe(captureIdle))
+        }
+
+        let decoderCannotKeepUp = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 30,
+            senderFramesPerSecond: 60,
+            targetFramesPerSecond: 60
+        )
+        XCTAssertNil(controller.observe(decoderCannotKeepUp))
+        XCTAssertEqual(
+            controller.observe(decoderCannotKeepUp)?.bitrateCeiling,
+            16_000_000)
+    }
+
+    func testFrameRateAdaptationRequiresSustainedMeasuredHeadroom() {
+        var controller = FrameRateAdaptiveController(
+            currentFramesPerSecond: 60,
+            maximumFramesPerSecond: 120,
+            healthySamplesRequired: 3
+        )
+        let currentP95IsTooSlowForPromotion = frameRateSample(
+            videoToolboxP95Milliseconds: 9.4,
+            encodeP95Milliseconds: 9.7,
+            renderedFramesPerSecond: 60
+        )
+        for _ in 0..<10 {
+            XCTAssertNil(controller.observe(currentP95IsTooSlowForPromotion))
+        }
+
+        let healthy = frameRateSample(
+            videoToolboxP95Milliseconds: 6,
+            encodeP95Milliseconds: 6.2,
+            renderedFramesPerSecond: 60
+        )
+        XCTAssertNil(controller.observe(healthy))
+        XCTAssertNil(controller.observe(healthy))
+        XCTAssertEqual(
+            controller.observe(healthy),
+            FrameRateAdaptationDecision(
+                framesPerSecond: 90,
+                reason: "sustained end-to-end headroom"
+            )
+        )
+    }
+
+    func testFrameRateAdaptationDropsQuicklyAndNeverPromotesStaticContent() {
+        var controller = FrameRateAdaptiveController(
+            currentFramesPerSecond: 90,
+            maximumFramesPerSecond: 120,
+            healthySamplesRequired: 2,
+            unhealthySamplesRequired: 2
+        )
+        let staticContent = frameRateSample(
+            videoToolboxP95Milliseconds: 5,
+            encodeP95Milliseconds: 5,
+            renderedFramesPerSecond: 1,
+            contentIsActive: false
+        )
+        for _ in 0..<5 {
+            XCTAssertNil(controller.observe(staticContent))
+        }
+
+        let pressure = frameRateSample(
+            videoToolboxP95Milliseconds: 10,
+            encodeP95Milliseconds: 10,
+            senderQueueDepth: 1,
+            renderedFramesPerSecond: 70
+        )
+        XCTAssertNil(controller.observe(pressure))
+        XCTAssertEqual(
+            controller.observe(pressure),
+            FrameRateAdaptationDecision(
+                framesPerSecond: 60,
+                reason: "sustained media pressure"
+            )
+        )
+    }
+
+    func testFrameRateAdaptationTreatsThermalPressureAsADownshiftSignal() {
+        var controller = FrameRateAdaptiveController(
+            currentFramesPerSecond: 120,
+            maximumFramesPerSecond: 120,
+            unhealthySamplesRequired: 2
+        )
+        let thermalPressure = frameRateSample(
+            videoToolboxP95Milliseconds: 5,
+            encodeP95Milliseconds: 5,
+            renderedFramesPerSecond: 120,
+            thermalConstrained: true
+        )
+        XCTAssertNil(controller.observe(thermalPressure))
+        XCTAssertEqual(
+            controller.observe(thermalPressure),
+            FrameRateAdaptationDecision(
+                framesPerSecond: 90,
+                reason: "sustained thermal pressure"
+            )
+        )
+    }
+
     func testNetworkInterfaceClassificationPrefersUSBOrEthernet() {
         XCTAssertEqual(
             NetworkPathObserver.classify(
@@ -456,6 +572,33 @@ final class TransportTests: XCTestCase {
         XCTAssertEqual(response.errorCode, .netProtocolMismatch)
         XCTAssertEqual(response.generation, 9)
         await channel.stop()
+    }
+
+    private func frameRateSample(
+        videoToolboxP95Milliseconds: Double,
+        encodeP95Milliseconds: Double,
+        senderQueueDepth: Int = 0,
+        receiverQueueDepth: Int = 0,
+        droppedFramesDelta: UInt64 = 0,
+        renderedFramesPerSecond: Double,
+        thermalConstrained: Bool = false,
+        contentIsActive: Bool = true
+    ) -> FrameRateAdaptationSample {
+        FrameRateAdaptationSample(
+            videoToolboxP95Milliseconds: videoToolboxP95Milliseconds,
+            encodeP95Milliseconds: encodeP95Milliseconds,
+            senderQueueDepth: senderQueueDepth,
+            receiverQueueDepth: receiverQueueDepth,
+            droppedFramesDelta: droppedFramesDelta,
+            renderedFramesPerSecond: renderedFramesPerSecond,
+            hardwareAccelerated: true,
+            lowLatencyRateControlEnabled: true,
+            thermalConstrained: thermalConstrained,
+            contentIsActive: contentIsActive,
+            fullResolution: true,
+            hasSufficientSamples: true,
+            roundTripMilliseconds: 10
+        )
     }
 }
 

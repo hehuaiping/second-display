@@ -34,6 +34,29 @@ final class MediaPipelineTests: XCTestCase {
         XCTAssertEqual(try EncoderSpec(width: 1920, height: 1200).profile, .high)
     }
 
+    func testLowLatencyRateControlAvoidsPeriodicIDRAndAllowsBoundedBurst() throws {
+        let spec = try EncoderSpec(
+            width: 2720,
+            height: 1260,
+            framesPerSecond: 60,
+            bitrate: 8_000_000,
+            maximumKeyFrameIntervalSeconds: 2)
+
+        let lowLatencyPlan = VideoEncoderRateControlPlan(
+            spec: spec,
+            lowLatencyRateControlEnabled: true)
+        XCTAssertNil(lowLatencyPlan.maximumKeyFrameIntervalFrames)
+        XCTAssertNil(lowLatencyPlan.maximumKeyFrameIntervalDurationSeconds)
+        XCTAssertEqual(lowLatencyPlan.dataRateLimitBytesPerSecond, 1_250_000)
+
+        let fallbackPlan = VideoEncoderRateControlPlan(
+            spec: spec,
+            lowLatencyRateControlEnabled: false)
+        XCTAssertEqual(fallbackPlan.maximumKeyFrameIntervalFrames, 120)
+        XCTAssertEqual(fallbackPlan.maximumKeyFrameIntervalDurationSeconds, 2)
+        XCTAssertEqual(fallbackPlan.dataRateLimitBytesPerSecond, 1_000_000)
+    }
+
     func testCaptureUsesMaximumSourceCadenceAtRequestedRefreshRate() {
         XCTAssertEqual(
             captureMinimumFrameInterval(framesPerSecond: 60, sourceRefreshRate: 60),
@@ -356,6 +379,54 @@ final class MediaPipelineTests: XCTestCase {
         XCTAssertTrue(types.contains(19) || types.contains(20), "Forced keyframe must contain HEVC IDR")
         XCTAssertEqual(encoded.encoderHardwareAccelerated, true)
         await encoder.invalidate()
+    }
+
+    func testHardwareEncoderLatencyBenchmarkWhenExplicitlyEnabled() async throws {
+        guard ProcessInfo.processInfo.environment["RUN_ENCODER_BENCHMARK"] == "1" else {
+            throw XCTSkip("Set RUN_ENCODER_BENCHMARK=1 to run the hardware encoder benchmark")
+        }
+
+        let codecs: [VideoEncoderCodec] =
+            VideoEncoderCapability.supportsHardwareHEVC ? [.h264, .hevc] : [.h264]
+        for codec in codecs {
+            let encoder = H264EncoderService()
+            try await encoder.configure(
+                EncoderSpec(
+                    width: 2720,
+                    height: 1260,
+                    framesPerSecond: 60,
+                    bitrate: 8_000_000,
+                    codec: codec))
+            var callbackLatenciesUs: [UInt64] = []
+            callbackLatenciesUs.reserveCapacity(180)
+            for sequence in 0..<180 {
+                let frame = try makeFrame(
+                    width: 2720,
+                    height: 1260,
+                    sequence: sequence,
+                    generation: 99)
+                let submittedUs = MediaClock.monotonicMicroseconds()
+                let encoded = try await encoder.encode(
+                    frame,
+                    forceKeyFrame: sequence == 0)
+                guard let encoded else { continue }
+                callbackLatenciesUs.append(
+                    encoded.encodeCallbackTimestampUs >= submittedUs
+                    ? encoded.encodeCallbackTimestampUs - submittedUs : 0)
+            }
+            await encoder.invalidate()
+
+            let sorted = callbackLatenciesUs.sorted()
+            XCTAssertGreaterThanOrEqual(sorted.count, 170)
+            let p50 = percentile(sorted, percentile: 0.50)
+            let p95 = percentile(sorted, percentile: 0.95)
+            let p99 = percentile(sorted, percentile: 0.99)
+            print(
+                "ENCODER_BENCHMARK codec=\(codec.rawValue) frames=\(sorted.count) "
+                    + "p50=\(formatMilliseconds(p50))ms "
+                    + "p95=\(formatMilliseconds(p95))ms "
+                    + "p99=\(formatMilliseconds(p99))ms")
+        }
     }
 
     func testBackpressureDropsOldFramesAndForcesIDR() async throws {
@@ -699,6 +770,18 @@ final class MediaPipelineTests: XCTestCase {
             await encoder.invalidate()
             throw XCTSkip("VideoToolbox encoder is unavailable in this execution environment")
         }
+    }
+
+    private func percentile(_ sorted: [UInt64], percentile: Double) -> UInt64 {
+        guard !sorted.isEmpty else { return 0 }
+        let index = min(
+            sorted.count - 1,
+            max(0, Int((Double(sorted.count - 1) * percentile).rounded(.up))))
+        return sorted[index]
+    }
+
+    private func formatMilliseconds(_ microseconds: UInt64) -> String {
+        String(format: "%.2f", Double(microseconds) / 1_000)
     }
 }
 

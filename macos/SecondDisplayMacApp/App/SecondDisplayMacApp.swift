@@ -79,6 +79,19 @@ private struct HostServiceView: View {
                 .foregroundStyle(model.phase == .failed ? Color.red : Color.secondary)
                 .textSelection(.enabled)
 
+            HStack(spacing: 12) {
+                Toggle(
+                    "Adaptive high refresh (experimental)",
+                    isOn: $model.adaptiveHighRefreshEnabled
+                )
+                .toggleStyle(.switch)
+                .disabled(model.isServiceActive)
+                Text("Starts at 60 FPS and promotes only after sustained performance headroom.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Spacer()
+            }
+
             HStack(alignment: .top, spacing: 12) {
                 GroupBox("Network") {
                     DetailGrid(rows: [
@@ -272,6 +285,14 @@ private final class HostServiceModel: ObservableObject {
     @Published private(set) var recoveryCount = "0"
     @Published private(set) var recentErrorCode = "—"
     @Published private(set) var selfTestSummary = "Not run"
+    @Published var adaptiveHighRefreshEnabled = false {
+        didSet {
+            UserDefaults.standard.set(
+                adaptiveHighRefreshEnabled,
+                forKey: Self.adaptiveHighRefreshKey
+            )
+        }
+    }
 
     private let service = P3HostService()
     private let screenCapturePermission = ScreenCapturePermissionController()
@@ -280,8 +301,12 @@ private final class HostServiceModel: ObservableObject {
     private var eventHistory: [P3HostEvent] = []
     private var latestSelfTest: P3DiagnosticSelfTestResult?
     private static let accessibilityPromptKey = "SecondDisplay.AccessibilityPromptIssued"
+    private static let adaptiveHighRefreshKey = "SecondDisplay.AdaptiveHighRefreshEnabled"
 
     private init() {
+        adaptiveHighRefreshEnabled = UserDefaults.standard.bool(
+            forKey: Self.adaptiveHighRefreshKey
+        )
         accessibilityRequestIssued = UserDefaults.standard.bool(
             forKey: Self.accessibilityPromptKey
         )
@@ -365,6 +390,8 @@ private final class HostServiceModel: ObservableObject {
         let configuration = P3HostConfiguration(
             identityData: credentials.identityData,
             identityPassword: credentials.password,
+            maximumFramesPerSecond: adaptiveHighRefreshEnabled ? 120 : 60,
+            allowsAdaptiveHighRefreshRate: adaptiveHighRefreshEnabled,
             certificateFingerprint: credentials.fingerprint
         )
         await service.start(configuration: configuration) { [weak self] event in

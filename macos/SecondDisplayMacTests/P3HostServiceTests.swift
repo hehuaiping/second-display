@@ -7,6 +7,15 @@ import XCTest
 @testable import P3HostCore
 
 final class P3HostServiceTests: XCTestCase {
+    func testHostPrefersLowerLatencyH264WhileKeepingHEVCFallback() {
+        XCTAssertEqual(
+            P3HostSessionRunner.preferredLowLatencyCodecs(supportsHardwareHEVC: true),
+            [.h264, .hevc])
+        XCTAssertEqual(
+            P3HostSessionRunner.preferredLowLatencyCodecs(supportsHardwareHEVC: false),
+            [.h264])
+    }
+
     func testAdaptiveResolutionKeepsHiDPILogicalMinimumForSystemAspectRatio() {
         let landscape = P3HostSessionRunner.scaledDimensions(
             width: 2720,
@@ -28,6 +37,7 @@ final class P3HostServiceTests: XCTestCase {
 
     func testHostUsesStableDefaultAndNormalizesExperimentalRefreshRates() {
         XCTAssertEqual(configuration().maximumFramesPerSecond, 60)
+        XCTAssertFalse(configuration().allowsAdaptiveHighRefreshRate)
         XCTAssertEqual(
             P3HostConfiguration(
                 identityData: Data([0]), identityPassword: "test", maximumFramesPerSecond: 95
@@ -39,6 +49,22 @@ final class P3HostServiceTests: XCTestCase {
                 identityData: Data([0]), identityPassword: "test", maximumFramesPerSecond: 120
             ).maximumFramesPerSecond,
             120
+        )
+        XCTAssertFalse(
+            P3HostConfiguration(
+                identityData: Data([0]),
+                identityPassword: "test",
+                maximumFramesPerSecond: 60,
+                allowsAdaptiveHighRefreshRate: true
+            ).allowsAdaptiveHighRefreshRate
+        )
+        XCTAssertTrue(
+            P3HostConfiguration(
+                identityData: Data([0]),
+                identityPassword: "test",
+                maximumFramesPerSecond: 120,
+                allowsAdaptiveHighRefreshRate: true
+            ).allowsAdaptiveHighRefreshRate
         )
     }
 

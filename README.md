@@ -9,23 +9,38 @@ macOS 端创建真正的扩展桌面、采集并硬件编码画面；HarmonyOS �
 > 项目使用 macOS 私有的 `CGVirtualDisplay` 能力。它适合研究、个人使用和受控环境，
 > 但系统升级可能导致兼容性变化，Apple 公证也不保证接受包含私有 API 的发行包。
 
+## V1.1.0 版本重点
+
+- 交互桌面默认优先使用硬件 H.264，保留 HEVC 回退；原生 2720×1260 / 60 FPS 真机测试中
+  VideoToolbox P95 约为 8.6～8.7 ms。
+- VideoToolbox 低延迟会话取消周期 IDR，改为首帧、重连、丢帧恢复和接收端请求时按需
+  生成 IDR，并提供 25% 有界瞬时码率余量。
+- 增加默认关闭的 **Adaptive high refresh (experimental)** 开关。会话从稳定 60 FPS
+  启动，只有编码、网络、接收渲染和温度持续满足门槛时才尝试 90/120 FPS。
+- 网络自适应现在以发送端实际产帧率评估接收渲染能力，不会再把 ScreenCaptureKit 的
+  静止 idle 误判为拥塞并无意义地降低分辨率。
+
 ## 能做什么
 
 - **把 HarmonyOS 设备作为扩展屏幕**：不是镜像投屏，Mac 可以把窗口拖到独立虚拟显示器。
 - **匹配设备原生分辨率**：接收端上报系统显示尺寸，不再固定为 1920×1200。
 - **横竖屏切换**：应用默认横屏启动，旋转后安全重建对应方向的虚拟显示器。
-- **60/90/120 Hz 协商**：根据 Mac、显示面板和硬件解码能力选择双方都支持的刷新率。
+- **安全的高刷新率试验**：发行默认保持 60 FPS；显式开启实验开关后可按端到端健康数据
+  尝试 90/120 FPS，并在编码、队列、温度或网络压力出现时快速降档。
 - **H.264/HEVC 硬编硬解**：macOS 使用 VideoToolbox，HarmonyOS 使用 AVCodec 和
-  XComponent Surface；能力不足时自动回退 H.264。
+  XComponent Surface；当前低延迟桌面优先 H.264，同时保留 HEVC 能力。
 - **低延迟桌面传输**：ScreenCaptureKit 采集、最新帧优先队列、禁止 B 帧、IDR 恢复、
   Direct Surface Rendering 和主动丢弃过期帧。
 - **网络自适应**：结合 RTT、发送队列、解码队列、掉帧和实时渲染 FPS 动态调整码率与分辨率。
-- **静态桌面优化**：利用 `dirtyRects` 区分静止/活动内容，降低静止画面的编码负载。
+- **静态桌面优化**：利用 `dirtyRects` 和 ScreenCaptureKit idle 区分静止/活动内容，
+  降低静止画面的编码负载，并避免低源帧率被误判为网络拥塞。
 - **触控控制**：支持单指移动/点击/拖动、双指滚动，以及 3/4/5 指滑动和捏合手势。
 - **可靠恢复**：网络切换、短暂断连、Surface 重建、睡眠唤醒和方向变化均使用 generation
   隔离，旧异步回调不能复活已经结束的会话。
 - **可安装的 Mac 应用**：DMG 应用内置服务生命周期界面，可启动/停止服务并查看 IP、
-  连接状态、配对信息、分辨率、帧率、码率、RTT 和掉帧。
+  连接状态、配对信息、实际编码格式、分辨率、帧率、码率、RTT、队列、掉帧和分阶段 P95。
+- **局域网主动发现**：HarmonyOS 应用自动扫描同一局域网内的 Second Display 服务，
+  展示已发现 Mac 并支持点击连接，同时保留手动地址入口。
 
 ## 工作原理
 
@@ -52,8 +67,10 @@ TLS/TCP 视频通道；仓库已经包含 QUIC 能力协商、分片、乱序重
 - HarmonyOS NEXT 工程当前目标版本为 6.0.1 (API 21)。
 - 当前 DMG 界面一次管理一个活动接收端；底层已经支持持久设备身份、方向隔离和跨
   Provider serial 冲突检测。
-- HarmonyOS 接收端当前默认连接 `192.168.43.9:52340/52341`，Mac IP 变化时需要同步修改
-  接收端配置；后续可增加服务发现或可编辑地址。
+- HarmonyOS 会主动发现同一局域网中的服务；部分访客 Wi‑Fi、AP 隔离或屏蔽 mDNS 的网络
+  可能无法发现，此时可使用应用内手动地址连接。
+- 90/120 FPS 仍是显式实验能力，默认关闭；当前原生分辨率真机编码 P95 尚不足以把
+  90/120 FPS 作为发行默认值。
 - 当前 GitHub Release DMG 使用 ad-hoc 签名且未经过 Apple 公证，不能通过标准
   Gatekeeper 信任校验。应用二进制更新后，macOS 也可能要求重新授予屏幕录制和辅助功能
   权限；请仅从本仓库 Release 下载并核对校验和与制品证明。
@@ -75,7 +92,8 @@ TLS/TCP 视频通道；仓库已经包含 QUIC 能力协商、分片、乱序重
 
 1. 使用 DevEco Studio 或 `hdc` 安装已签名 HAP。
 2. 确保 HarmonyOS 设备与 Mac 处于同一可达网络。
-3. 打开 Second Display，点击**连接 Mac**。
+3. 打开 Second Display，在自动发现列表中选择 Mac 并点击**连接**；发现不可用时使用
+   手动地址入口。
 4. 连接成功后控制面板会自动隐藏，设备显示 macOS 扩展桌面。
 
 停止服务时，Mac 应用会取消采集、编码和网络任务，并释放虚拟显示器。
@@ -90,6 +108,13 @@ TLS/TCP 视频通道；仓库已经包含 QUIC 能力协商、分片、乱序重
 swift build
 swift test
 python3 tools/validate_shared_vectors.py
+```
+
+显式运行本机硬件编码对比基准：
+
+```sh
+RUN_ENCODER_BENCHMARK=1 swift test -c release \
+  --filter MediaPipelineTests/testHardwareEncoderLatencyBenchmarkWhenExplicitlyEnabled
 ```
 
 生成本地 DMG：

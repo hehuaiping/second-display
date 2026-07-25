@@ -10,26 +10,43 @@ while the HarmonyOS app hardware-decodes the stream and sends touch gestures bac
 > research, personal use, and controlled environments, but OS updates may break compatibility and
 > Apple notarization is not guaranteed for distributions that use private APIs.
 
+## V1.1.0 highlights
+
+- Interactive desktop sessions now prefer hardware H.264 while retaining HEVC fallback. On the
+  tested 2720×1260 / 60 FPS device path, VideoToolbox P95 was about 8.6–8.7 ms.
+- Low-latency VideoToolbox sessions no longer insert periodic IDRs. IDRs are generated for the
+  first frame, reconnects, recovery, or receiver requests, with 25% bounded burst headroom.
+- The new **Adaptive high refresh (experimental)** switch is off by default. A session starts at a
+  stable 60 FPS and attempts 90/120 FPS only after sustained encoder, network, receiver, and
+  thermal headroom.
+- Network adaptation now evaluates receiver rendering against the sender's actual frame rate, so
+  ScreenCaptureKit idle periods are no longer mistaken for congestion.
+
 ## What it can do
 
 - **Create a real extended desktop** rather than mirroring the Mac screen.
 - **Match the receiver's native resolution** instead of forcing 1920×1200.
 - **Switch between landscape and portrait** with generation-safe virtual-display rebuilding.
-- **Negotiate 60, 90, or 120 Hz** based on the Mac, panel, and hardware decoder capabilities.
+- **Experiment safely with high refresh rates** while keeping 60 FPS as the release default.
+  Explicitly enabled sessions may promote to 90/120 FPS from end-to-end health data and quickly
+  downshift under encoder, queue, thermal, or network pressure.
 - **Hardware-encode and decode H.264 or HEVC** with VideoToolbox on macOS and AVCodec plus an
-  XComponent Surface on HarmonyOS. H.264 remains the compatibility fallback.
+  XComponent Surface on HarmonyOS. Low-latency desktop sessions currently prefer H.264 and retain
+  HEVC as a supported fallback.
 - **Prioritize low latency** with ScreenCaptureKit, latest-frame queues, no B-frames, IDR recovery,
   direct Surface rendering, and stale-frame dropping.
 - **Adapt to network conditions** using RTT, sender and decoder queues, drop counts, and receiver
   render FPS to adjust bitrate and resolution.
-- **Reduce static-desktop work** by using ScreenCaptureKit `dirtyRects` to classify active and
-  static content.
+- **Reduce static-desktop work** with ScreenCaptureKit `dirtyRects` and idle delivery while
+  preventing a low source frame rate from being misclassified as network congestion.
 - **Control the Mac with touch**, including pointer movement, click, drag, two-finger scroll, and
   three-, four-, or five-finger swipe and pinch gestures.
 - **Recover safely** from network changes, brief disconnects, Surface recreation, sleep/wake, and
   orientation changes. Old asynchronous callbacks cannot revive a stopped generation.
 - **Run as an installable Mac app** with Start/Stop Service controls, IP, pairing, connection state,
-  resolution, FPS, bitrate, RTT, and drop diagnostics.
+  negotiated codec, resolution, FPS, bitrate, RTT, queues, drops, and staged P95 diagnostics.
+- **Discover hosts on the LAN** from the HarmonyOS app, select a discovered Mac, and connect with
+  one tap while retaining a manual-address fallback.
 
 ## How it works
 
@@ -57,9 +74,10 @@ only when both peers expose a usable runtime API.
 - The HarmonyOS NEXT project currently targets 6.0.1 (API 21).
 - The DMG UI manages one active receiver at a time. The lower layers already provide persistent
   device identity, orientation isolation, and process-wide serial collision detection.
-- The receiver currently connects to `192.168.43.9:52340/52341` by default. If the Mac IP changes,
-  the receiver configuration must be updated; service discovery or an editable address is future
-  work.
+- The receiver actively discovers services on the LAN. Guest Wi-Fi, AP isolation, or networks that
+  block mDNS may prevent discovery; use the manual-address fallback in that case.
+- 90/120 FPS remains an explicitly enabled experiment. Current native-resolution encoder P95 does
+  not yet justify enabling it by default.
 - Current GitHub Release DMGs use ad-hoc signing and are not Apple-notarized, so they do not pass
   the standard Gatekeeper trust assessment. macOS may also ask for Screen Recording and
   Accessibility permissions again after the binary changes. Download only from this repository
@@ -83,7 +101,8 @@ See [P6 implementation status](docs/P6_IMPLEMENTATION_STATUS.md) for capability 
 
 1. Install a locally signed HAP with DevEco Studio or `hdc`.
 2. Put the receiver and Mac on the same reachable network.
-3. Open Second Display and tap **Connect Mac**.
+3. Open Second Display, select the Mac from the discovered-host list, and tap **Connect**. Use the
+   manual-address entry if discovery is unavailable.
 4. After connection, the overlay hides automatically and the device shows the extended desktop.
 
 Stopping the service cancels capture, encode, transport, and recovery work and releases the virtual
@@ -99,6 +118,13 @@ Xcode, Swift 6.1, and a current macOS SDK are required:
 swift build
 swift test
 python3 tools/validate_shared_vectors.py
+```
+
+Run the opt-in local hardware encoder comparison:
+
+```sh
+RUN_ENCODER_BENCHMARK=1 swift test -c release \
+  --filter MediaPipelineTests/testHardwareEncoderLatencyBenchmarkWhenExplicitlyEnabled
 ```
 
 Create and verify a local DMG:

@@ -28,6 +28,50 @@ public enum VideoEncoderCapability {
     }
 }
 
+struct VideoEncoderRateControlPlan: Equatable, Sendable {
+    static let lowLatencyBurstNumerator = 5
+    static let lowLatencyBurstDenominator = 4
+
+    let maximumKeyFrameIntervalFrames: Int?
+    let maximumKeyFrameIntervalDurationSeconds: Int?
+    let dataRateLimitBytesPerSecond: Int
+
+    init(spec: EncoderSpec, lowLatencyRateControlEnabled: Bool) {
+        if lowLatencyRateControlEnabled {
+            // VideoToolbox 的低延迟码率控制本身使用无限 GOP。恢复路径会显式请求 IDR，
+            // 因此不再每两秒插入周期 IDR，避免关键帧突发挤压后续帧。
+            maximumKeyFrameIntervalFrames = nil
+            maximumKeyFrameIntervalDurationSeconds = nil
+        } else {
+            maximumKeyFrameIntervalFrames =
+                spec.framesPerSecond * spec.maximumKeyFrameIntervalSeconds
+            maximumKeyFrameIntervalDurationSeconds = spec.maximumKeyFrameIntervalSeconds
+        }
+
+        let averageBytesPerSecond = max(1, spec.bitrate / 8)
+        if lowLatencyRateControlEnabled {
+            // AverageBitRate 仍控制长期均值，DataRateLimits 仅留出 25% 短时突发空间，
+            // 防止复杂桌面/显式 IDR 被一秒硬上限阻塞，同时保持网络流量有界。
+            dataRateLimitBytesPerSecond =
+                averageBytesPerSecond * Self.lowLatencyBurstNumerator
+                / Self.lowLatencyBurstDenominator
+        } else {
+            dataRateLimitBytesPerSecond = averageBytesPerSecond
+        }
+    }
+
+    init(bitsPerSecond: Int, lowLatencyRateControlEnabled: Bool) {
+        let averageBytesPerSecond = max(1, bitsPerSecond / 8)
+        maximumKeyFrameIntervalFrames = nil
+        maximumKeyFrameIntervalDurationSeconds = nil
+        dataRateLimitBytesPerSecond =
+            lowLatencyRateControlEnabled
+            ? averageBytesPerSecond * Self.lowLatencyBurstNumerator
+                / Self.lowLatencyBurstDenominator
+            : averageBytesPerSecond
+    }
+}
+
 public actor H264EncoderService: VideoEncoding {
     private var sessionBox: CompressionSessionBox?
     private var configurationToken: UInt64 = 0
@@ -85,6 +129,9 @@ public actor H264EncoderService: VideoEncoding {
         }
 
         do {
+            let rateControlPlan = VideoEncoderRateControlPlan(
+                spec: spec,
+                lowLatencyRateControlEnabled: enabledLowLatency)
             try setProperty(created, key: kVTCompressionPropertyKey_RealTime, value: kCFBooleanTrue)
             try setProperty(
                 created,
@@ -103,16 +150,24 @@ public actor H264EncoderService: VideoEncoding {
                 value: NSNumber(value: 0),
                 allowUnsupported: true
             )
-            try setProperty(
-                created,
-                key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
-                value: NSNumber(value: spec.framesPerSecond * spec.maximumKeyFrameIntervalSeconds)
-            )
-            try setProperty(
-                created,
-                key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
-                value: NSNumber(value: spec.maximumKeyFrameIntervalSeconds)
-            )
+            if let maximumKeyFrameIntervalFrames =
+                rateControlPlan.maximumKeyFrameIntervalFrames
+            {
+                try setProperty(
+                    created,
+                    key: kVTCompressionPropertyKey_MaxKeyFrameInterval,
+                    value: NSNumber(value: maximumKeyFrameIntervalFrames)
+                )
+            }
+            if let maximumKeyFrameIntervalDurationSeconds =
+                rateControlPlan.maximumKeyFrameIntervalDurationSeconds
+            {
+                try setProperty(
+                    created,
+                    key: kVTCompressionPropertyKey_MaxKeyFrameIntervalDuration,
+                    value: NSNumber(value: maximumKeyFrameIntervalDurationSeconds)
+                )
+            }
             let profile: CFString =
                 spec.codec == .hevc
                 ? kVTProfileLevel_HEVC_Main_AutoLevel
@@ -120,7 +175,10 @@ public actor H264EncoderService: VideoEncoding {
                     ? kVTProfileLevel_H264_High_AutoLevel
                     : kVTProfileLevel_H264_Main_AutoLevel
             try setProperty(created, key: kVTCompressionPropertyKey_ProfileLevel, value: profile)
-            try Self.setBitrate(spec.bitrate, on: created)
+            try Self.setBitrate(
+                spec.bitrate,
+                lowLatencyRateControlEnabled: enabledLowLatency,
+                on: created)
             let prepareStatus = VTCompressionSessionPrepareToEncodeFrames(created)
             guard prepareStatus == noErr else {
                 throw SessionError(
@@ -260,12 +318,8 @@ public actor H264EncoderService: VideoEncoding {
             throw CancellationError()
         }
         guard let encoded = result else { return nil }
-        let hardwareAccelerated =
-            Self.boolProperty(
-                kVTCompressionPropertyKey_UsingHardwareAcceleratedVideoEncoder,
-                on: session
-            ) ?? encoderHardwareAccelerated
-        encoderHardwareAccelerated = hardwareAccelerated
+        // 编码器实例在整个 session 生命周期内不会在软硬件之间切换，避免逐帧同步查询属性。
+        let hardwareAccelerated = encoderHardwareAccelerated
         return EncodedFrame(
             sequence: encoded.sequence,
             presentationTimeStampUs: encoded.presentationTimeStampUs,
@@ -289,7 +343,10 @@ public actor H264EncoderService: VideoEncoding {
         guard let session = sessionBox?.session else {
             throw SessionError(code: .encCreateFailed, detail: "Encoder is not configured")
         }
-        try Self.setBitrate(bitsPerSecond, on: session)
+        try Self.setBitrate(
+            bitsPerSecond,
+            lowLatencyRateControlEnabled: lowLatencyRateControlEnabled == true,
+            on: session)
     }
 
     public func invalidate() async {
@@ -326,7 +383,11 @@ public actor H264EncoderService: VideoEncoding {
         }
     }
 
-    private static func setBitrate(_ bitsPerSecond: Int, on session: VTCompressionSession) throws {
+    private static func setBitrate(
+        _ bitsPerSecond: Int,
+        lowLatencyRateControlEnabled: Bool,
+        on session: VTCompressionSession
+    ) throws {
         let averageStatus = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_AverageBitRate,
@@ -336,8 +397,13 @@ public actor H264EncoderService: VideoEncoding {
             throw SessionError(
                 code: .encCreateFailed, detail: "Unable to update bitrate: OSStatus \(averageStatus)")
         }
-        let bytesPerSecond = max(1, bitsPerSecond / 8)
-        let limits = [NSNumber(value: bytesPerSecond), NSNumber(value: 1)] as CFArray
+        let plan = VideoEncoderRateControlPlan(
+            bitsPerSecond: bitsPerSecond,
+            lowLatencyRateControlEnabled: lowLatencyRateControlEnabled)
+        let limits = [
+            NSNumber(value: plan.dataRateLimitBytesPerSecond),
+            NSNumber(value: 1),
+        ] as CFArray
         let limitStatus = VTSessionSetProperty(
             session,
             key: kVTCompressionPropertyKey_DataRateLimits,
