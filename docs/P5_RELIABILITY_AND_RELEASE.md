@@ -8,7 +8,7 @@
 | T502 sleep/wake | Implemented, real-cycle validation required | Workspace sleep invalidates the active generation and all media objects; wake creates a new generation. Display removal callbacks trigger bounded recovery. |
 | T503 diagnostics | Implemented | The app shows capability, mode, bitrate, RTT, video queue, recovery count and recent error; it supports display self-test, redacted JSON export and error-code copy. |
 | T504 compatibility | Implemented | A bundled manifest blocks denied builds before backend creation. Unknown builds remain experimental. CI produces a review-only candidate report. |
-| T505 distribution | Tooling complete, Developer ID result pending credentials | DMG packaging supports hardened Developer ID signing and `notarytool`; verification checks identity, signature, Gatekeeper, staple and persistent helpers. |
+| T505 distribution | Ad-hoc public distribution implemented | DMG packaging verifies the ad-hoc signature, bundle identity, image integrity and persistent-helper absence. Developer ID and `notarytool` remain supported as an optional future upgrade. |
 
 ## Compatibility smoke
 
@@ -28,16 +28,20 @@ The JSON report records OS version/build, architecture, every stage duration and
 manifest entry. A report never edits the shipped manifest automatically. New builds therefore stay
 `experimental` until a human reviews successful create/enumerate/capture/destroy evidence.
 
-## Developer ID and notarization
+## macOS distribution signing
 
-Local/ad-hoc packaging remains available:
+The current public Release workflow uses ad-hoc signing:
 
 ```sh
-tools/package_macos_dmg.sh
-tools/verify_macos_distribution.sh
+MACOS_SIGN_IDENTITY=- INSTALL_LOCAL_PAIRING_IDENTITY=0 tools/package_macos_dmg.sh
+REQUIRE_ADHOC=1 tools/verify_macos_distribution.sh
 ```
 
-Release validation requires real Developer ID and notary credentials:
+This proves bundle integrity but does **not** establish an Apple developer identity, pass standard
+Gatekeeper assessment or claim Apple notarization. Release notes and build metadata must retain
+that disclosure.
+
+Developer ID signing and notarization remain available as an optional future upgrade:
 
 ```sh
 MACOS_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
@@ -47,9 +51,8 @@ tools/package_macos_dmg.sh
 REQUIRE_GATEKEEPER=1 REQUIRE_NOTARIZATION=1 tools/verify_macos_distribution.sh
 ```
 
-Current local results only prove ad-hoc signature and DMG integrity. They do **not** claim that
-Apple has accepted the private API during notarization. Record the actual notary submission ID and
-result here before declaring T505 complete on a clean distribution machine.
+Record the actual notary submission ID and result here before changing the release workflow to
+claim Developer ID trust on a clean distribution machine.
 
 The bundle identifier remains `com.cuihua.cloud.display.macos`. The app installs no LaunchAgent,
 daemon, XPC service or privileged helper; stopping/termination synchronously releases the virtual

@@ -54,8 +54,9 @@ TLS/TCP 视频通道；仓库已经包含 QUIC 能力协商、分片、乱序重
   Provider serial 冲突检测。
 - HarmonyOS 接收端当前默认连接 `192.168.43.9:52340/52341`，Mac IP 变化时需要同步修改
   接收端配置；后续可增加服务发现或可编辑地址。
-- 本地 DMG 默认使用 ad-hoc 签名。应用二进制更新后，macOS 可能要求重新授予屏幕录制和
-  辅助功能权限。稳定发行应使用 Developer ID 签名并实际完成公证测试。
+- 当前 GitHub Release DMG 使用 ad-hoc 签名且未经过 Apple 公证，不能通过标准
+  Gatekeeper 信任校验。应用二进制更新后，macOS 也可能要求重新授予屏幕录制和辅助功能
+  权限；请仅从本仓库 Release 下载并核对校验和与制品证明。
 - 剪贴板、软键盘和快捷键通道尚未实现；独立光标侧信道代码保留，但默认使用原始 Mac 光标。
 
 详细的 P6 能力和运行时门控见
@@ -98,7 +99,7 @@ tools/package_macos_dmg.sh
 tools/verify_macos_distribution.sh
 ```
 
-生成 Developer ID 签名包时设置：
+未来升级为 Developer ID 签名和公证包时可设置：
 
 ```sh
 MACOS_SIGN_IDENTITY="Developer ID Application: Example (TEAMID)" \
@@ -122,9 +123,10 @@ hvigorw assembleHap --mode module \
 
 ### GitHub Release
 
-正式发布由 `vMAJOR.MINOR.PATCH` 标签驱动，执行测试、Developer ID 签名、Apple 公证、
-校验和与制品证明后才发布 macOS DMG。HarmonyOS 暂时只做编译验证，不签名或上传发布
-制品。配置 Secrets、可选 HarmonyOS 编译 Runner 和创建标签的完整步骤见
+正式发布由 `vMAJOR.MINOR.PATCH` 标签驱动，执行测试、ad-hoc 签名、DMG 完整性检查、
+校验和与制品证明后发布 macOS DMG；当前产物不声明 Developer ID 身份或 Apple 公证。
+HarmonyOS 暂时只做编译验证，不签名或上传发布制品。可选 HarmonyOS 编译 Runner 和
+创建标签的完整步骤见
 [Tag-Driven Release 发布流程](docs/RELEASE_PROCESS.md)。
 
 ## 目录结构

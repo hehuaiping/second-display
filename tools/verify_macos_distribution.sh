@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
-DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.0.0-macos-$(uname -m).dmg"}
+DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.0.1-macos-$(uname -m).dmg"}
 EXPECTED_BUNDLE_ID="com.cuihua.cloud.display.macos"
 TEMPORARY_DIRECTORY=$(mktemp -d /tmp/second-display-verify.XXXXXX)
 MOUNT_POINT="$TEMPORARY_DIRECTORY/mount"
@@ -34,6 +34,15 @@ if [[ ! -d "$APP_PATH" ]]; then
 fi
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
+SIGNATURE_INFORMATION=$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)
+if print -r -- "$SIGNATURE_INFORMATION" | grep -q '^Signature=adhoc$'; then
+    print "Ad-hoc signature confirmed"
+elif [[ "${REQUIRE_ADHOC:-0}" == "1" ]]; then
+    print -u2 "VD_APPLY_FAILED: ad-hoc signature is required"
+    exit 1
+else
+    print "Developer identity signature detected"
+fi
 ACTUAL_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")
 if [[ "$ACTUAL_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]]; then
     print -u2 "VD_APPLY_FAILED: bundle identifier changed to $ACTUAL_BUNDLE_ID"
