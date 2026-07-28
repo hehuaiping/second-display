@@ -70,6 +70,37 @@ class DeviceMetricAnalyzerTests(unittest.TestCase):
                 render_service_records(),
             )
 
+    def test_connection_metadata_proves_full_connected_duration(self) -> None:
+        context = MODULE.validate_connection_metadata(
+            "\n".join(
+                [
+                    "duration_seconds=120",
+                    "connection_ready=1",
+                    "connection_wait_seconds=9",
+                    "connected_measurement_seconds=120",
+                    "measurement_completed=1",
+                    "ui_automation_enabled=1",
+                    "ui_connect_click_count=1",
+                    "ui_scan_clicked=0",
+                ]
+            )
+        )
+        self.assertEqual(context["connected_measurement_seconds"], 120)
+        self.assertEqual(context["ui_connect_click_count"], 1)
+
+    def test_connection_metadata_rejects_empty_sampling(self) -> None:
+        with self.assertRaisesRegex(ValueError, "连接前置门禁未完成"):
+            MODULE.validate_connection_metadata(
+                "\n".join(
+                    [
+                        "duration_seconds=120",
+                        "connection_ready=0",
+                        "connected_measurement_seconds=0",
+                        "measurement_completed=0",
+                    ]
+                )
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -123,6 +123,37 @@ def parse_render_service(text: str, record_limit: int = 180) -> dict[str, float 
     }
 
 
+def validate_connection_metadata(text: str) -> dict[str, int]:
+    values = {}
+    for line in text.splitlines():
+        if "=" not in line:
+            continue
+        key, value = line.split("=", 1)
+        values[key] = value
+    required = {
+        "connection_ready": 1,
+        "measurement_completed": 1,
+    }
+    for key, expected in required.items():
+        if values.get(key) != str(expected):
+            raise ValueError(f"连接前置门禁未完成：{key}={values.get(key, 'missing')}")
+    try:
+        duration = int(values["duration_seconds"])
+        measured = int(values["connected_measurement_seconds"])
+    except (KeyError, ValueError) as error:
+        raise ValueError("连接后采样时长元数据缺失或无效") from error
+    if measured < duration:
+        raise ValueError(f"真实连接后只采样 {measured} 秒，要求至少 {duration} 秒")
+    return {
+        "connection_ready": 1,
+        "connection_wait_seconds": int(values.get("connection_wait_seconds", "0")),
+        "connected_measurement_seconds": measured,
+        "ui_automation_enabled": int(values.get("ui_automation_enabled", "0")),
+        "ui_connect_click_count": int(values.get("ui_connect_click_count", "0")),
+        "ui_scan_clicked": int(values.get("ui_scan_clicked", "0")),
+    }
+
+
 def analyze(host_text: str, render_service_text: str) -> dict[str, object]:
     all_host_samples = parse_host_log(host_text)
     if len(all_host_samples) < 5:
@@ -236,6 +267,21 @@ def render_summary(result: dict[str, object]) -> str:
             f"- RenderService 样本：{measurements['render_service_record_count']}",
             f"- RenderService pair delta P95："
             f"{measurements['render_service_pair_delta_p95_ms']:.2f} ms（仅诊断，不等同 click-to-photon）",
+        ]
+    )
+    validation_context = result.get("validation_context")
+    if isinstance(validation_context, dict):
+        lines.extend(
+            [
+                f"- 真实流连接：{'已确认' if validation_context['connection_ready'] == 1 else '未确认'}",
+                f"- 连接等待：{validation_context['connection_wait_seconds']} 秒",
+                f"- 连接后有效采样：{validation_context['connected_measurement_seconds']} 秒",
+                f"- 界面自动化：{'开启' if validation_context['ui_automation_enabled'] == 1 else '关闭'}",
+                f"- 自动连接点击：{validation_context['ui_connect_click_count']} 次",
+            ]
+        )
+    lines.extend(
+        [
             "",
             "## 尚不能由本脚本证明",
             "",
@@ -252,14 +298,24 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--host-log", type=Path, required=True)
     parser.add_argument("--render-service", type=Path, required=True)
+    parser.add_argument("--metadata", type=Path)
     parser.add_argument("--json-output", type=Path, required=True)
     parser.add_argument("--summary-output", type=Path, required=True)
     arguments = parser.parse_args()
     try:
+        validation_context = (
+            validate_connection_metadata(
+                arguments.metadata.read_text(encoding="utf-8", errors="replace")
+            )
+            if arguments.metadata is not None
+            else None
+        )
         result = analyze(
             arguments.host_log.read_text(encoding="utf-8", errors="replace"),
             arguments.render_service.read_text(encoding="utf-8", errors="replace"),
         )
+        if validation_context is not None:
+            result["validation_context"] = validation_context
     except (OSError, ValueError) as error:
         result = {"status": "INCOMPLETE", "error": str(error)}
         arguments.json_output.write_text(

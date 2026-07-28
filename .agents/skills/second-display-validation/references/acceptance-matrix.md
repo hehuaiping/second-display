@@ -55,10 +55,13 @@ VideoToolbox 的“接近原生”目标仍为 ≤8 ms，click-to-photon P95 目
 
 1. 构建并安装当前 signed debug HAP，不复用未知旧包。
 2. 启动 `P3PoCHost` 的 100% dirty 动画，使用系统协商分辨率和 60 FPS。
-3. 完成发现、配对、连接，连续运行至少 120 秒。
-4. 采集主机阶段指标、RenderService FPS、Surface、screen、top 和应用包信息。
-5. 自动分析必须通过上表全部强制门槛。
-6. Host 正常结束后再次启动服务，App 必须能回到可连接状态并重新连接。
+3. 从实时布局树定位控件，自动接受隐私提示、扫描并点击已配对服务的“连接”；不得使用
+   只适配单台设备的固定坐标，也不得自动信任陌生 Mac。
+4. 主机必须出现非零编码帧和非零接收 FPS；确认真实流后才开始累计 120 秒测试时长。
+   未配对、连接超时或主机提前退出均直接判定为未通过，不得继续分析空采样。
+5. 采集主机阶段指标、RenderService FPS、Surface、screen、top、布局操作和应用包信息。
+6. 自动分析必须通过上表全部强制门槛。
+7. Host 正常结束后再次启动服务，App 必须能回到可连接状态并重新连接。
 
 ### D1：180 秒交互门禁
 
@@ -133,6 +136,9 @@ tools/verify_macos_distribution.sh <实际 DMG 路径>
 - `screen.txt`
 - `top.txt`
 - `bundle-info.txt`
+- `device-ui-layout.json`
+- `ui-actions.log`
+- `ui-dump.log`
 - `metrics.json`
 - `summary.md`
 - `operator-checklist.md`

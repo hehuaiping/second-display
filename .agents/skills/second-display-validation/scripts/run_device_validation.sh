@@ -12,12 +12,13 @@ SCENARIO="animated"
 DURATION_SECONDS=120
 INSTALL_CURRENT_HAP=1
 REQUESTED_DEVICE_ID="${SD_DEVICE_ID:-}"
-CONNECTION_TIMEOUT_SECONDS=90
+CONNECTION_TIMEOUT_SECONDS="${SD_CONNECTION_TIMEOUT_SECONDS:-90}"
+UI_AUTOMATION_ENABLED="${SD_UI_AUTOMATION:-1}"
 HOST_PID=""
 
 usage() {
     print "用法：$PROGRAM_NAME [--scenario animated|interaction] [--duration 秒数] [--long]"
-    print "       [--device id] [--no-install]"
+    print "       [--device id] [--no-install] [--manual-ui]"
 }
 
 while [[ $# -gt 0 ]]; do
@@ -45,6 +46,10 @@ while [[ $# -gt 0 ]]; do
             INSTALL_CURRENT_HAP=0
             shift
             ;;
+        --manual-ui)
+            UI_AUTOMATION_ENABLED=0
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -62,6 +67,14 @@ if [[ "$SCENARIO" != "animated" && "$SCENARIO" != "interaction" ]]; then
 fi
 if [[ "$DURATION_SECONDS" != <-> || "$DURATION_SECONDS" -lt 90 ]]; then
     print -u2 "NET_PROTOCOL_MISMATCH: 真机测试时长必须是大于等于 90 的整数秒"
+    exit 2
+fi
+if [[ "$CONNECTION_TIMEOUT_SECONDS" != <-> || "$CONNECTION_TIMEOUT_SECONDS" -lt 15 ]]; then
+    print -u2 "NET_PROTOCOL_MISMATCH: SD_CONNECTION_TIMEOUT_SECONDS 必须是大于等于 15 的整数秒"
+    exit 2
+fi
+if [[ "$UI_AUTOMATION_ENABLED" != "0" && "$UI_AUTOMATION_ENABLED" != "1" ]]; then
+    print -u2 "NET_PROTOCOL_MISMATCH: SD_UI_AUTOMATION 必须是 0 或 1"
     exit 2
 fi
 
@@ -155,6 +168,8 @@ RENDER_SERVICE_LOG="$EVIDENCE_DIRECTORY/render-service-fps.txt"
     print "scenario=$SCENARIO"
     print "duration_seconds=$DURATION_SECONDS"
     print "installed_current_hap=$INSTALL_CURRENT_HAP"
+    print "ui_automation_enabled=$UI_AUTOMATION_ENABLED"
+    print "connection_timeout_seconds=$CONNECTION_TIMEOUT_SECONDS"
 } > "$EVIDENCE_DIRECTORY/metadata.txt"
 
 print "[device] 构建 release 版 P3PoCHost"
@@ -198,8 +213,9 @@ else
 fi
 
 P3_BINARY="$WORKSPACE_DIRECTORY/.build/release/P3PoCHost"
+HOST_RUNTIME_SECONDS=$((DURATION_SECONDS + CONNECTION_TIMEOUT_SECONDS + 30))
 print "[device] 启动 P3PoCHost 和 HarmonyOS Ability"
-P3_POC_DURATION_SECONDS=$DURATION_SECONDS \
+P3_POC_DURATION_SECONDS=$HOST_RUNTIME_SECONDS \
 P3_POC_MAX_FPS=60 \
 P3_POC_ANIMATED_TEST_PATTERN=$ANIMATED_TEST_PATTERN \
 P3_POC_TLS_DIRECTORY="$WORKSPACE_DIRECTORY/.build/p3-poc-tls" \
@@ -210,24 +226,117 @@ HOST_PID=$!
     -a "$ABILITY_NAME" -b "$BUNDLE_NAME" -m entry \
     > "$EVIDENCE_DIRECTORY/ability-start.txt" 2>&1
 
-print "[device] 如设备出现提示，请选择已发现的 Mac 并完成配对"
+REMOTE_UI_LAYOUT="/data/local/tmp/second-display-validation-layout.json"
+LOCAL_UI_LAYOUT="$EVIDENCE_DIRECTORY/device-ui-layout.json"
+UI_ACTION_LOG="$EVIDENCE_DIRECTORY/ui-actions.log"
+UI_DUMP_LOG="$EVIDENCE_DIRECTORY/ui-dump.log"
+
+dump_device_ui() {
+    "${HDC_COMMAND[@]}" shell uitest dumpLayout \
+        -b "$BUNDLE_NAME" -p "$REMOTE_UI_LAYOUT" >> "$UI_DUMP_LOG" 2>&1 \
+        || return 1
+    "${HDC_COMMAND[@]}" file recv "$REMOTE_UI_LAYOUT" "$LOCAL_UI_LAYOUT" \
+        >> "$UI_DUMP_LOG" 2>&1
+}
+
+stream_has_real_frames() {
+    rg -q \
+        'P3 PoC streaming:.*recv [1-9][0-9]*\.[0-9]+/display .*encoded=[1-9][0-9]*' \
+        "$HOST_LOG"
+}
+
+if [[ "$UI_AUTOMATION_ENABLED" == "1" ]]; then
+    print "[device] 自动查找已配对的 Mac，并在真实流就绪后开始采样"
+else
+    print "[device] 已禁用界面自动化，请在设备上选择已配对的 Mac"
+fi
 CONNECTED=0
 SECONDS_WAITED=0
+SCAN_CLICKED=0
+PAIRING_REQUIRED_SEEN=0
+CONNECT_CLICK_COUNT=0
+LAST_CONNECT_CLICK_SECOND=-30
+NEXT_UI_INSPECTION_SECOND=0
 while (( SECONDS_WAITED < CONNECTION_TIMEOUT_SECONDS )); do
-    if rg -q 'P3 PoC streaming:' "$HOST_LOG"; then
+    if stream_has_real_frames; then
         CONNECTED=1
         break
     fi
     if ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
         break
     fi
+
+    if [[ "$UI_AUTOMATION_ENABLED" == "1" \
+        && "$SECONDS_WAITED" -ge "$NEXT_UI_INSPECTION_SECOND" ]]; then
+        NEXT_UI_INSPECTION_SECOND=$((SECONDS_WAITED + 2))
+        UI_DECISION="INVALID_LAYOUT 0 0"
+        if dump_device_ui; then
+            UI_DECISION=$(python3 "$SCRIPT_DIRECTORY/resolve_device_ui_action.py" \
+                --layout "$LOCAL_UI_LAYOUT" 2>> "$UI_ACTION_LOG") \
+                || UI_DECISION="INVALID_LAYOUT 0 0"
+        fi
+        read -r UI_ACTION UI_X UI_Y <<< "$UI_DECISION"
+        print "$(date -u '+%Y-%m-%dT%H:%M:%SZ') action=$UI_ACTION x=$UI_X y=$UI_Y" \
+            >> "$UI_ACTION_LOG"
+        case "$UI_ACTION" in
+            ACCEPT_PRIVACY)
+                "${HDC_COMMAND[@]}" shell uitest uiInput click "$UI_X" "$UI_Y" \
+                    >> "$UI_ACTION_LOG" 2>&1 || true
+                ;;
+            SCAN)
+                if [[ "$SCAN_CLICKED" == "0" ]]; then
+                    "${HDC_COMMAND[@]}" shell uitest uiInput click "$UI_X" "$UI_Y" \
+                        >> "$UI_ACTION_LOG" 2>&1 || true
+                    SCAN_CLICKED=1
+                fi
+                ;;
+            CONNECT)
+                if (( CONNECT_CLICK_COUNT < 2 \
+                    && SECONDS_WAITED - LAST_CONNECT_CLICK_SECOND >= 10 )); then
+                    "${HDC_COMMAND[@]}" shell uitest uiInput click "$UI_X" "$UI_Y" \
+                        >> "$UI_ACTION_LOG" 2>&1 || true
+                    CONNECT_CLICK_COUNT=$((CONNECT_CLICK_COUNT + 1))
+                    LAST_CONNECT_CLICK_SECOND=$SECONDS_WAITED
+                fi
+                ;;
+            PAIRING_REQUIRED)
+                PAIRING_REQUIRED_SEEN=1
+                ;;
+        esac
+    fi
     sleep 1
     SECONDS_WAITED=$((SECONDS_WAITED + 1))
 done
+{
+    print "connection_ready=$CONNECTED"
+    print "connection_wait_seconds=$SECONDS_WAITED"
+    print "ui_scan_clicked=$SCAN_CLICKED"
+    print "ui_connect_click_count=$CONNECT_CLICK_COUNT"
+    print "pairing_required_seen=$PAIRING_REQUIRED_SEEN"
+} >> "$EVIDENCE_DIRECTORY/metadata.txt"
 if [[ "$CONNECTED" != "1" ]]; then
-    print -u2 "NET_HANDSHAKE_TIMEOUT: 设备未在 $CONNECTION_TIMEOUT_SECONDS 秒内进入串流状态"
+    {
+        print "connected_measurement_seconds=0"
+        print "measurement_completed=0"
+    } >> "$EVIDENCE_DIRECTORY/metadata.txt"
+    # 即使没有进入采样阶段也生成机器可读的 INCOMPLETE 证据，不能把连接失败误认为性能失败。
+    python3 "$SCRIPT_DIRECTORY/analyze_device_metrics.py" \
+        --host-log "$HOST_LOG" \
+        --render-service "$RENDER_SERVICE_LOG" \
+        --metadata "$EVIDENCE_DIRECTORY/metadata.txt" \
+        --json-output "$EVIDENCE_DIRECTORY/metrics.json" \
+        --summary-output "$EVIDENCE_DIRECTORY/summary.md" \
+        >/dev/null 2>&1 || true
+    if [[ "$PAIRING_REQUIRED_SEEN" == "1" ]]; then
+        print -u2 "NET_PAIRING_REQUIRED: 设备发现了未配对的 Mac；请先人工完成一次安全配对"
+    else
+        print -u2 \
+            "NET_HANDSHAKE_TIMEOUT: 自动界面操作后仍未在 $CONNECTION_TIMEOUT_SECONDS 秒内收到真实视频帧"
+    fi
+    print -u2 "[device] 连接诊断：$UI_ACTION_LOG"
     exit 1
 fi
+print "[device] 已确认非零编码帧和接收 FPS，正式开始 $DURATION_SECONDS 秒采样"
 
 cat > "$EVIDENCE_DIRECTORY/operator-checklist.md" <<EOF
 # 真机人工检查清单
@@ -262,8 +371,20 @@ else
 fi
 
 SAMPLE_INDEX=0
-while kill -0 "$HOST_PID" >/dev/null 2>&1; do
-    sleep 10
+MEASURED_SECONDS=0
+MEASUREMENT_COMPLETED=1
+while (( MEASURED_SECONDS < DURATION_SECONDS )); do
+    if ! kill -0 "$HOST_PID" >/dev/null 2>&1; then
+        MEASUREMENT_COMPLETED=0
+        break
+    fi
+    SAMPLE_INTERVAL=10
+    REMAINING_SECONDS=$((DURATION_SECONDS - MEASURED_SECONDS))
+    if (( REMAINING_SECONDS < SAMPLE_INTERVAL )); then
+        SAMPLE_INTERVAL=$REMAINING_SECONDS
+    fi
+    sleep "$SAMPLE_INTERVAL"
+    MEASURED_SECONDS=$((MEASURED_SECONDS + SAMPLE_INTERVAL))
     SAMPLE_INDEX=$((SAMPLE_INDEX + 1))
     if (( SAMPLE_INDEX % 3 == 0 )); then
         {
@@ -272,12 +393,20 @@ while kill -0 "$HOST_PID" >/dev/null 2>&1; do
         } >> "$EVIDENCE_DIRECTORY/top.txt" 2>&1 || true
     fi
 done
+
+if [[ -n "$HOST_PID" ]] && kill -0 "$HOST_PID" >/dev/null 2>&1; then
+    kill -TERM "$HOST_PID" >/dev/null 2>&1 || true
+fi
 set +e
 wait "$HOST_PID"
 HOST_STATUS=$?
 set -e
 HOST_PID=""
-print "host_exit_status=$HOST_STATUS" >> "$EVIDENCE_DIRECTORY/metadata.txt"
+{
+    print "connected_measurement_seconds=$MEASURED_SECONDS"
+    print "measurement_completed=$MEASUREMENT_COMPLETED"
+    print "host_exit_status=$HOST_STATUS"
+} >> "$EVIDENCE_DIRECTORY/metadata.txt"
 
 print "[device] 采集 RenderService 和屏幕证据"
 "${HDC_COMMAND[@]}" shell hidumper -s RenderService \
@@ -291,6 +420,7 @@ set +e
 python3 "$SCRIPT_DIRECTORY/analyze_device_metrics.py" \
     --host-log "$HOST_LOG" \
     --render-service "$RENDER_SERVICE_LOG" \
+    --metadata "$EVIDENCE_DIRECTORY/metadata.txt" \
     --json-output "$EVIDENCE_DIRECTORY/metrics.json" \
     --summary-output "$EVIDENCE_DIRECTORY/summary.md"
 ANALYZER_STATUS=$?
@@ -300,5 +430,9 @@ print "[device] 证据目录：$EVIDENCE_DIRECTORY"
 if [[ "$INSTALL_CURRENT_HAP" != "1" ]]; then
     print -u2 "DEVICE_VALIDATION_INCOMPLETE: --no-install 结果不能用于源码改动验收"
     exit 2
+fi
+if [[ "$MEASUREMENT_COMPLETED" != "1" ]]; then
+    print -u2 "NET_CONNECTION_LOST: 主机在完成连接后的采样时长前退出"
+    exit 1
 fi
 exit "$ANALYZER_STATUS"
