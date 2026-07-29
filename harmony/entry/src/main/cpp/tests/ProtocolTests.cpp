@@ -2,6 +2,7 @@
 #include "protocol/Json.hpp"
 #include "protocol/VideoFrame.hpp"
 #include "decoder/DecoderFrameQueue.hpp"
+#include "decoder/LatencyWindow.hpp"
 #include "decoder/DecoderOutputPolicy.hpp"
 #include "transport/FrameParser.hpp"
 
@@ -182,6 +183,15 @@ void TestIncrementalFrameParser()
     Check(prefix.Ok() && prefix.frames.empty(), "incremental parser waits for partial header");
     const auto frames = parser.Feed("current", sticky.data() + 7, sticky.size() - 7);
     Check(frames.Ok() && frames.frames.size() == 2, "incremental parser handles sticky frames");
+    Check(frames.frames.size() == 2
+            && frames.frames[0].payload.SharesStorageWith(frames.frames[1].payload),
+        "incremental parser shares bounded backing instead of copying each payload");
+    std::uint8_t copiedPayload[5] {};
+    Check(frames.frames.size() == 2
+            && frames.frames[0].payload.CopyTo(copiedPayload, sizeof(copiedPayload))
+            && std::equal(std::begin(copiedPayload), std::end(copiedPayload),
+                frames.frames[0].payload.begin()),
+        "video payload performs one bounded copy into decoder storage");
     Check(parser.BufferedBytes() == 0, "incremental parser releases fully consumed storage");
     Check(parser.Finish("current").Ok(), "incremental parser finishes on frame boundary");
 
@@ -209,6 +219,9 @@ void TestIncrementalFrameParser()
         "trailing", third.data() + 19, third.size() - 19);
     Check(completed.Ok() && completed.frames.size() == 1 && trailing.BufferedBytes() == 0,
         "incremental parser completes a trailing frame after deferred compaction");
+    Check(initial.frames.size() == 1 && initial.frames[0].payload.size() == 5
+            && initial.frames[0].payload[4] == 0x65,
+        "completed frame backing remains valid after parser reuses trailing storage");
 
     FrameParser oldSession;
     oldSession.BeginSession("new");
@@ -311,6 +324,22 @@ void TestDecoderBackpressure()
         "decoder still renders the newest late frame to preserve final desktop state");
 }
 
+void TestLatencyWindow()
+{
+    second_display::decoder::LatencyWindow<4> window;
+    window.Add(10);
+    window.Add(20);
+    window.Add(30);
+    Check(window.Size() == 3, "latency window tracks sample count");
+    Check(window.Percentile(0.5) == 20, "latency window computes p50");
+    Check(window.Percentile(0.95) == 30, "latency window computes p95");
+    Check(window.Average() == 20, "latency window computes average");
+    window.Add(40);
+    window.Add(50);
+    Check(window.Size() == 4 && window.Percentile(0) == 20,
+        "latency window overwrites oldest sample");
+}
+
 } // namespace
 
 int main(int argc, char** argv)
@@ -325,6 +354,7 @@ int main(int argc, char** argv)
     TestIncrementalFrameParser();
     TestFrameParserFuzz();
     TestDecoderBackpressure();
+    TestLatencyWindow();
     if (failures == 0) std::cout << "Harmony C++ protocol tests passed\n";
     return failures == 0 ? 0 : 1;
 }

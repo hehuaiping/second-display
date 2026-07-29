@@ -16,6 +16,24 @@ final class P3HostServiceTests: XCTestCase {
             [.h264])
     }
 
+    func testEffectiveReceiverPresentationRateUsesSlowerDisplayStage() {
+        let feedback = ReceiverFeedback(
+            sessionId: "session",
+            sequence: 1,
+            decoderQueueDepth: 1,
+            droppedFrames: 0,
+            renderedFramesPerSecond: 90,
+            displayFramesPerSecond: 60,
+            displayIntervalP95Us: 16_800,
+            decodeOutputP95Us: 9_000,
+            networkType: "wifi"
+        )
+        XCTAssertEqual(
+            P3HostSessionRunner.effectiveReceiverPresentationFramesPerSecond(feedback),
+            60
+        )
+    }
+
     func testAdaptiveResolutionKeepsHiDPILogicalMinimumForSystemAspectRatio() {
         let landscape = P3HostSessionRunner.scaledDimensions(
             width: 2720,
@@ -38,6 +56,7 @@ final class P3HostServiceTests: XCTestCase {
     func testHostUsesStableDefaultAndNormalizesExperimentalRefreshRates() {
         XCTAssertEqual(configuration().maximumFramesPerSecond, 60)
         XCTAssertFalse(configuration().allowsAdaptiveHighRefreshRate)
+        XCTAssertFalse(configuration().allowsAdaptiveResolution)
         XCTAssertEqual(
             P3HostConfiguration(
                 identityData: Data([0]), identityPassword: "test", maximumFramesPerSecond: 95
@@ -65,6 +84,13 @@ final class P3HostServiceTests: XCTestCase {
                 maximumFramesPerSecond: 120,
                 allowsAdaptiveHighRefreshRate: true
             ).allowsAdaptiveHighRefreshRate
+        )
+        XCTAssertTrue(
+            P3HostConfiguration(
+                identityData: Data([0]),
+                identityPassword: "test",
+                allowsAdaptiveResolution: true
+            ).allowsAdaptiveResolution
         )
     }
 

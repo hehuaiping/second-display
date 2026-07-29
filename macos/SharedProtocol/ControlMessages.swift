@@ -425,6 +425,9 @@ public struct ReceiverFeedback: Codable, Equatable, Sendable {
     public let decoderQueueDepth: Int
     public let droppedFrames: UInt64
     public let renderedFramesPerSecond: Double
+    public let displayFramesPerSecond: Double?
+    public let displayIntervalP95Us: UInt64?
+    public let decodeOutputP95Us: UInt64?
     public let networkType: String
 
     public init(
@@ -433,6 +436,9 @@ public struct ReceiverFeedback: Codable, Equatable, Sendable {
         decoderQueueDepth: Int,
         droppedFrames: UInt64,
         renderedFramesPerSecond: Double,
+        displayFramesPerSecond: Double? = nil,
+        displayIntervalP95Us: UInt64? = nil,
+        decodeOutputP95Us: UInt64? = nil,
         networkType: String
     ) {
         self.type = "receiverFeedback"
@@ -442,12 +448,16 @@ public struct ReceiverFeedback: Codable, Equatable, Sendable {
         self.decoderQueueDepth = decoderQueueDepth
         self.droppedFrames = droppedFrames
         self.renderedFramesPerSecond = renderedFramesPerSecond
+        self.displayFramesPerSecond = displayFramesPerSecond
+        self.displayIntervalP95Us = displayIntervalP95Us
+        self.decodeOutputP95Us = decodeOutputP95Us
         self.networkType = networkType
     }
 
     private enum CodingKeys: String, CodingKey {
         case type, protocolVersion, sessionId, sequence, decoderQueueDepth
-        case droppedFrames, renderedFramesPerSecond, networkType
+        case droppedFrames, renderedFramesPerSecond, displayFramesPerSecond
+        case displayIntervalP95Us, decodeOutputP95Us, networkType
     }
 
     public init(from decoder: Decoder) throws {
@@ -462,11 +472,27 @@ public struct ReceiverFeedback: Codable, Equatable, Sendable {
         droppedFrames = try values.decode(UInt64.self, forKey: .droppedFrames)
         renderedFramesPerSecond = try values.decode(
             Double.self, forKey: .renderedFramesPerSecond)
+        displayFramesPerSecond = try values.decodeIfPresent(
+            Double.self, forKey: .displayFramesPerSecond)
+        displayIntervalP95Us = try values.decodeIfPresent(
+            UInt64.self, forKey: .displayIntervalP95Us)
+        decodeOutputP95Us = try values.decodeIfPresent(
+            UInt64.self, forKey: .decodeOutputP95Us)
         networkType = try values.decode(String.self, forKey: .networkType)
+        let displayFramesAreValid = displayFramesPerSecond.map {
+            $0.isFinite && (0...240).contains($0)
+        } ?? true
+        let displayIntervalIsValid =
+            displayIntervalP95Us.map { $0 <= 1_000_000 } ?? true
+        let decodeOutputIsValid =
+            decodeOutputP95Us.map { $0 <= 2_000_000 } ?? true
         guard !sessionId.isEmpty, sessionId.count <= 128,
             (0...64).contains(decoderQueueDepth),
             renderedFramesPerSecond.isFinite,
             (0...240).contains(renderedFramesPerSecond),
+            displayFramesAreValid,
+            displayIntervalIsValid,
+            decodeOutputIsValid,
             !networkType.isEmpty,
             networkType.utf8.count <= 32
         else {

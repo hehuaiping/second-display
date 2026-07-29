@@ -7,6 +7,8 @@ final class P3AnimatedTestPattern {
     private let framesPerSecond: Int
     private var timer: DispatchSourceTimer?
 
+    var generatedFrameCount: UInt64 { view.generatedFrameCount }
+
     init(
         screen: NSScreen,
         framebufferWidth: Int,
@@ -84,6 +86,7 @@ private final class P3TestPatternView: NSView {
     }
 
     override var isFlipped: Bool { true }
+    var generatedFrameCount: UInt64 { frameNumber }
 
     func advanceFrame() {
         frameNumber &+= 1

@@ -25,7 +25,7 @@ Integer ReadNetwork(const std::vector<std::uint8_t>& bytes, std::size_t offset)
     return value;
 }
 
-bool IsAnnexB(const std::vector<std::uint8_t>& payload)
+bool IsAnnexB(const protocol::VideoPayload& payload)
 {
     if (payload.size() < 4 || payload[0] != 0 || payload[1] != 0) return false;
     return payload[2] == 1 || (payload[2] == 0 && payload[3] == 1);
@@ -36,7 +36,7 @@ bool IsAnnexB(const std::vector<std::uint8_t>& payload)
 void FrameParser::BeginSession(std::string sessionId)
 {
     sessionId_ = std::move(sessionId);
-    buffer_.clear();
+    buffer_ = std::make_shared<protocol::VideoPayload::Storage>();
     readOffset_ = 0;
     lastSequence_.reset();
     failed_ = sessionId_.empty();
@@ -57,10 +57,10 @@ FrameParserResult FrameParser::Feed(
         }
         const auto available = kMaximumBufferedFrame - BufferedBytes();
         const auto amount = std::min({size - offset, available, kAppendChunkSize});
-        if (readOffset_ > 0 && buffer_.size() + amount > kMaximumBufferedFrame) {
+        if (readOffset_ > 0 && buffer_->size() + amount > kMaximumBufferedFrame) {
             CompactConsumed(true);
         }
-        buffer_.insert(buffer_.end(), bytes + offset, bytes + offset + amount);
+        buffer_->insert(buffer_->end(), bytes + offset, bytes + offset + amount);
         offset += amount;
         auto parsed = ParseAvailable();
         if (!parsed.Ok()) return parsed;
@@ -90,14 +90,14 @@ FrameParserResult FrameParser::ParseAvailable()
     FrameParserResult result;
     while (BufferedBytes() >= protocol::kVideoFrameHeaderSize) {
         const auto frameStart = readOffset_;
-        if (!std::equal(kMagic.begin(), kMagic.end(), buffer_.begin() + frameStart)) {
+        if (!std::equal(kMagic.begin(), kMagic.end(), buffer_->begin() + frameStart)) {
             return Failure("invalid video frame magic");
         }
-        if (buffer_[frameStart + 4] != 1) return Failure("unsupported video frame version");
-        if (buffer_[frameStart + 5] != 1 && buffer_[frameStart + 5] != 2) {
+        if ((*buffer_)[frameStart + 4] != 1) return Failure("unsupported video frame version");
+        if ((*buffer_)[frameStart + 5] != 1 && (*buffer_)[frameStart + 5] != 2) {
             return Failure("invalid video frame type");
         }
-        const auto payloadLength = ReadNetwork<std::uint32_t>(buffer_, frameStart + 28);
+        const auto payloadLength = ReadNetwork<std::uint32_t>(*buffer_, frameStart + 28);
         if (payloadLength > protocol::kMaximumVideoPayloadSize) {
             return Failure("video payload exceeds 16 MiB");
         }
@@ -105,15 +105,16 @@ FrameParserResult FrameParser::ParseAvailable()
         if (BufferedBytes() < frameSize) break;
 
         protocol::VideoFrame frame;
-        frame.frameType = static_cast<protocol::VideoFrameType>(buffer_[frameStart + 5]);
-        frame.flags = ReadNetwork<std::uint16_t>(buffer_, frameStart + 6);
-        frame.sequence = ReadNetwork<std::uint32_t>(buffer_, frameStart + 8);
-        frame.ptsUs = ReadNetwork<std::uint64_t>(buffer_, frameStart + 12);
-        frame.captureUs = ReadNetwork<std::uint64_t>(buffer_, frameStart + 20);
+        frame.frameType = static_cast<protocol::VideoFrameType>((*buffer_)[frameStart + 5]);
+        frame.flags = ReadNetwork<std::uint16_t>(*buffer_, frameStart + 6);
+        frame.sequence = ReadNetwork<std::uint32_t>(*buffer_, frameStart + 8);
+        frame.ptsUs = ReadNetwork<std::uint64_t>(*buffer_, frameStart + 12);
+        frame.captureUs = ReadNetwork<std::uint64_t>(*buffer_, frameStart + 20);
         const auto payloadStart = frameStart + protocol::kVideoFrameHeaderSize;
-        frame.payload.assign(
-            buffer_.begin() + payloadStart,
-            buffer_.begin() + frameStart + frameSize);
+        const auto payload = protocol::VideoPayload::SharedSlice(
+            buffer_, payloadStart, payloadLength);
+        if (!payload.has_value()) return Failure("video payload slice is invalid");
+        frame.payload = std::move(*payload);
         if (!IsAnnexB(frame.payload)) return Failure("video payload is not Annex B");
         if (!SequenceIsNewer(frame.sequence)) return Failure("video sequence moved backwards");
         lastSequence_ = frame.sequence;
@@ -127,7 +128,7 @@ FrameParserResult FrameParser::ParseAvailable()
 FrameParserResult FrameParser::Failure(std::string detail)
 {
     failed_ = true;
-    buffer_.clear();
+    buffer_ = std::make_shared<protocol::VideoPayload::Storage>();
     readOffset_ = 0;
     return {{}, std::string(protocol::kProtocolErrorCode), std::move(detail)};
 }
@@ -142,14 +143,16 @@ bool FrameParser::SequenceIsNewer(std::uint32_t value) const
 void FrameParser::CompactConsumed(bool force)
 {
     if (readOffset_ == 0) return;
-    if (readOffset_ == buffer_.size()) {
-        buffer_.clear();
+    if (readOffset_ == buffer_->size()) {
+        buffer_ = std::make_shared<protocol::VideoPayload::Storage>();
         readOffset_ = 0;
         return;
     }
     constexpr std::size_t kCompactionThreshold = 64 * 1024;
-    if (!force && readOffset_ < kCompactionThreshold) return;
-    buffer_.erase(buffer_.begin(), buffer_.begin() + readOffset_);
+    if (!force && readOffset_ < kCompactionThreshold && buffer_.use_count() == 1) return;
+    auto trailing = std::make_shared<protocol::VideoPayload::Storage>(
+        buffer_->begin() + readOffset_, buffer_->end());
+    buffer_ = std::move(trailing);
     readOffset_ = 0;
 }
 

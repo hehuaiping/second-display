@@ -430,10 +430,209 @@ final class TransportTests: XCTestCase {
             senderFramesPerSecond: 60,
             targetFramesPerSecond: 60
         )
-        XCTAssertNil(controller.observe(decoderCannotKeepUp))
+        for _ in 0..<4 {
+            XCTAssertNil(controller.observe(decoderCannotKeepUp))
+        }
+        let receiverPressure = controller.observe(decoderCannotKeepUp)
+        XCTAssertEqual(receiverPressure?.bitrateCeiling, 20_000_000)
+        XCTAssertEqual(receiverPressure?.resolutionScale, 0.8)
+        XCTAssertEqual(receiverPressure?.requiresStreamRebuild, true)
+        XCTAssertEqual(receiverPressure?.reason, "sustained receiver media pressure")
+    }
+
+    func testNetworkAdaptationIgnoresIntentionalStaleDropsAtFullPresentationRate() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let latestWinsDrops = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 8,
+            renderedFramesPerSecond: 60,
+            senderFramesPerSecond: 60,
+            hostDroppedFramesDelta: 0,
+            encodeP95Milliseconds: 8,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        for _ in 0..<30 {
+            XCTAssertNil(controller.observe(latestWinsDrops))
+        }
+        XCTAssertEqual(controller.currentResolutionScale, 1)
+    }
+
+    func testNetworkAdaptationDownscalesForSustainedHostMediaPressure() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let pressure = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 30,
+            senderFramesPerSecond: 30,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 10,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        var rebuild: NetworkAdaptationDecision?
+        for _ in 0..<10 {
+            if let decision = controller.observe(pressure), decision.requiresStreamRebuild {
+                rebuild = decision
+                break
+            }
+        }
+        XCTAssertEqual(rebuild?.resolutionScale, 0.8)
+        XCTAssertEqual(rebuild?.reason, "sustained host media pressure")
+    }
+
+    func testNetworkAdaptationRestoresBaseBitrateForHostPressureOnHealthyNetwork() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let networkCongestion = NetworkAdaptationSample(
+            roundTripMilliseconds: 80,
+            senderQueueDepth: 1,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 60,
+            senderFramesPerSecond: 60,
+            hostDroppedFramesDelta: 0,
+            encodeP95Milliseconds: 8,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        XCTAssertNil(controller.observe(networkCongestion))
+        XCTAssertEqual(controller.observe(networkCongestion)?.bitrateCeiling, 16_000_000)
+
+        let hostPressure = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 30,
+            senderFramesPerSecond: 30,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 9,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        let recovery = controller.observe(hostPressure)
+        XCTAssertEqual(recovery?.bitrateCeiling, 20_000_000)
+        XCTAssertEqual(recovery?.resolutionScale, 1)
+        XCTAssertEqual(recovery?.requiresStreamRebuild, false)
+        XCTAssertEqual(recovery?.reason, "host media bitrate recovery")
+    }
+
+    func testNetworkAdaptationIgnoresReceiverWarmupBeforeApplyingDecisions() {
+        var controller = NetworkAdaptiveController(
+            baseBitrate: 20_000_000,
+            warmupSamplesRequired: 3
+        )
+        let startupPressure = NetworkAdaptationSample(
+            roundTripMilliseconds: 130,
+            senderQueueDepth: 2,
+            receiverQueueDepth: 4,
+            droppedFramesDelta: 20,
+            renderedFramesPerSecond: 15,
+            senderFramesPerSecond: 30,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 20,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        for _ in 0..<3 {
+            XCTAssertNil(controller.observe(startupPressure))
+        }
+        XCTAssertNil(controller.observe(startupPressure))
         XCTAssertEqual(
-            controller.observe(decoderCannotKeepUp)?.bitrateCeiling,
+            controller.observe(startupPressure)?.bitrateCeiling,
             16_000_000)
+    }
+
+    func testNetworkAdaptationKeepsNativeResolutionWhenScalingIsDisabled() {
+        var controller = NetworkAdaptiveController(
+            baseBitrate: 20_000_000,
+            initialResolutionScale: 0.8,
+            allowsResolutionScaling: false
+        )
+        let pressure = NetworkAdaptationSample(
+            roundTripMilliseconds: 130,
+            senderQueueDepth: 2,
+            receiverQueueDepth: 4,
+            droppedFramesDelta: 8,
+            renderedFramesPerSecond: 30,
+            senderFramesPerSecond: 30,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 20,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+
+        for _ in 0..<60 {
+            XCTAssertNotEqual(controller.observe(pressure)?.requiresStreamRebuild, true)
+        }
+        XCTAssertEqual(controller.currentResolutionScale, 1)
+    }
+
+    func testNetworkAdaptationDoesNotTreatStaticContentAsHostPressure() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let staticContent = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 2,
+            senderFramesPerSecond: 3,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 20,
+            contentIsActive: false,
+            targetFramesPerSecond: 60
+        )
+        for _ in 0..<30 {
+            XCTAssertNil(controller.observe(staticContent))
+        }
+        XCTAssertEqual(controller.currentResolutionScale, 1)
+    }
+
+    func testNetworkAdaptationUsesLongerHysteresisToRestoreResolution() {
+        var controller = NetworkAdaptiveController(baseBitrate: 20_000_000)
+        let pressure = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 30,
+            senderFramesPerSecond: 30,
+            hostDroppedFramesDelta: 20,
+            encodeP95Milliseconds: 10,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        for _ in 0..<10 {
+            if controller.observe(pressure)?.requiresStreamRebuild == true { break }
+        }
+        XCTAssertEqual(controller.currentResolutionScale, 0.8)
+
+        let healthy = NetworkAdaptationSample(
+            roundTripMilliseconds: 12,
+            senderQueueDepth: 0,
+            receiverQueueDepth: 0,
+            droppedFramesDelta: 0,
+            renderedFramesPerSecond: 60,
+            senderFramesPerSecond: 60,
+            hostDroppedFramesDelta: 0,
+            encodeP95Milliseconds: 8,
+            contentIsActive: true,
+            targetFramesPerSecond: 60
+        )
+        var rebuild: NetworkAdaptationDecision?
+        for index in 0..<20 {
+            let decision = controller.observe(healthy)
+            if decision?.requiresStreamRebuild == true {
+                rebuild = decision
+                XCTAssertEqual(index, 19)
+            }
+        }
+        XCTAssertEqual(rebuild?.resolutionScale, 1)
+        XCTAssertEqual(rebuild?.reason, "sustained media recovery")
     }
 
     func testFrameRateAdaptationRequiresSustainedMeasuredHeadroom() {
@@ -452,8 +651,8 @@ final class TransportTests: XCTestCase {
         }
 
         let healthy = frameRateSample(
-            videoToolboxP95Milliseconds: 6,
-            encodeP95Milliseconds: 6.2,
+            videoToolboxP95Milliseconds: 5.5,
+            encodeP95Milliseconds: 5.8,
             renderedFramesPerSecond: 60
         )
         XCTAssertNil(controller.observe(healthy))
@@ -522,6 +721,29 @@ final class TransportTests: XCTestCase {
         )
     }
 
+    func testFrameRateAdaptationUsesDisplayAndDecoderTailPressure() {
+        var controller = FrameRateAdaptiveController(
+            currentFramesPerSecond: 90,
+            maximumFramesPerSecond: 120,
+            unhealthySamplesRequired: 2
+        )
+        let displayMismatch = frameRateSample(
+            videoToolboxP95Milliseconds: 5,
+            encodeP95Milliseconds: 5,
+            renderedFramesPerSecond: 90,
+            displayFramesPerSecond: 60,
+            decoderOutputP95Milliseconds: 12
+        )
+        XCTAssertNil(controller.observe(displayMismatch))
+        XCTAssertEqual(
+            controller.observe(displayMismatch),
+            FrameRateAdaptationDecision(
+                framesPerSecond: 60,
+                reason: "sustained media pressure"
+            )
+        )
+    }
+
     func testNetworkInterfaceClassificationPrefersUSBOrEthernet() {
         XCTAssertEqual(
             NetworkPathObserver.classify(
@@ -581,6 +803,9 @@ final class TransportTests: XCTestCase {
         receiverQueueDepth: Int = 0,
         droppedFramesDelta: UInt64 = 0,
         renderedFramesPerSecond: Double,
+        displayFramesPerSecond: Double? = nil,
+        displayIntervalP95Milliseconds: Double? = nil,
+        decoderOutputP95Milliseconds: Double? = nil,
         thermalConstrained: Bool = false,
         contentIsActive: Bool = true
     ) -> FrameRateAdaptationSample {
@@ -591,6 +816,10 @@ final class TransportTests: XCTestCase {
             receiverQueueDepth: receiverQueueDepth,
             droppedFramesDelta: droppedFramesDelta,
             renderedFramesPerSecond: renderedFramesPerSecond,
+            displayFramesPerSecond: displayFramesPerSecond ?? renderedFramesPerSecond,
+            displayIntervalP95Milliseconds:
+                displayIntervalP95Milliseconds ?? 1_000 / max(1.0, renderedFramesPerSecond),
+            decoderOutputP95Milliseconds: decoderOutputP95Milliseconds ?? 4,
             hardwareAccelerated: true,
             lowLatencyRateControlEnabled: true,
             thermalConstrained: thermalConstrained,

@@ -9,6 +9,7 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstring>
 #include <limits>
 #include <string_view>
@@ -66,16 +67,17 @@ bool H264SurfaceDecoder::Configure(
     Stop();
     const bool supportsLowLatency = SupportsHardwareLowLatencyDecoder(codec);
     if (ConfigureAttempt(
-            window, width, height, framesPerSecond, codec, generation, supportsLowLatency, error)) {
+            window, width, height, framesPerSecond, codec, generation,
+            supportsLowLatency, error)) {
         return true;
     }
     if (!supportsLowLatency) return false;
 
-    // 某些厂商解码器虽声明低延迟能力，却会在特定分辨率或帧率下拒绝可选参数。
-    // 此时无参数重建，保证优化能力不可用时仍能回退到兼容解码路径。
+    // 厂商解码器拒绝低延迟可选参数时，以同一 generation 重建兼容实例。
     Stop();
     error.clear();
-    return ConfigureAttempt(window, width, height, framesPerSecond, codec, generation, false, error);
+    return ConfigureAttempt(
+        window, width, height, framesPerSecond, codec, generation, false, error);
 }
 
 bool H264SurfaceDecoder::ConfigureAttempt(
@@ -155,6 +157,14 @@ bool H264SurfaceDecoder::ConfigureAttempt(
         } else {
             running_ = true;
             lowLatencyEnabled_ = lowLatencyEnabled;
+            // Mate 60 Pro 真机 A/B 中，以 now 调用 RenderOutputBufferAtTime 会频繁错过
+            // 下一次 VSync 并退化到约 30 FPS，因此发行路径保持立即 Surface 呈现。
+            timedRenderingEnabled_ = false;
+            // MAX_INPUT/OUTPUT_BUFFER_COUNT=3 在该解码器上同样退化到约 30 FPS，
+            // 且 RenderService FIFO 仍为 21；不再把“参数被接受”误判为实际有界。
+            boundedBufferCountsEnabled_ = false;
+            maximumOutputAgeUs_ = static_cast<std::uint64_t>(
+                std::clamp(std::ceil(1'250'000.0 / framesPerSecond), 10'000.0, 25'000.0));
         }
     }
     if (generationChanged) {
@@ -209,6 +219,8 @@ void H264SurfaceDecoder::Stop()
         inputBuffers_.clear();
         submittedFrames_.clear();
         lowLatencyEnabled_ = false;
+        timedRenderingEnabled_ = false;
+        boundedBufferCountsEnabled_ = false;
         codec = codec_;
         codec_ = nullptr;
         callbackContext = std::move(callbackContext_);
@@ -235,8 +247,9 @@ H264SurfaceDecoder::Statistics H264SurfaceDecoder::GetStatistics() const
 {
     std::lock_guard lock(mutex_);
     return {decodedFrames_, renderedFrames_, staleOutputDrops_, lastInputQueueLatencyUs_,
-        lastDecodeLatencyUs_, lastOutputLatencyUs_, submittedFrames_.size(),
-        lowLatencyEnabled_, true};
+        lastDecodeLatencyUs_, lastOutputLatencyUs_, decodeOutputLatenciesUs_.Percentile(0.95),
+        submittedFrames_.size(), lowLatencyEnabled_, true, timedRenderingEnabled_,
+        boundedBufferCountsEnabled_};
 }
 
 void H264SurfaceDecoder::ResetStatistics()
@@ -248,6 +261,7 @@ void H264SurfaceDecoder::ResetStatistics()
     lastInputQueueLatencyUs_ = 0;
     lastDecodeLatencyUs_ = 0;
     lastOutputLatencyUs_ = 0;
+    decodeOutputLatenciesUs_.Reset();
 }
 
 void H264SurfaceDecoder::SetKeyFrameRequestHandler(KeyFrameRequest handler)
@@ -349,12 +363,18 @@ void H264SurfaceDecoder::HandleOutput(
         decodedFrames_ += 1;
         lastDecodeLatencyUs_ = decodeLatencyUs;
         lastOutputLatencyUs_ = latencyUs;
-        const bool hasNewerFrame = !submittedFrames_.empty() || frames_.Size() > 0;
-        // 已经过期且后方有更新画面时直接释放输出，优先保障交互时延而不是完整播放每一帧。
-        const auto decision = DecideDecoderOutput(latencyUs, kMaximumOutputAgeUs, hasNewerFrame);
-        const auto result = decision.render
-            ? OH_VideoDecoder_RenderOutputBuffer(codec, index)
-            : OH_VideoDecoder_FreeOutputBuffer(codec, index);
+        decodeOutputLatenciesUs_.Add(latencyUs);
+        const auto newerFrameCount = submittedFrames_.size() + frames_.Size();
+        // 真机 A/B 表明仅落后一帧就释放输出会让部分硬件解码器出现供给不足。只有至少积压
+        // 两帧时才跳过过期呈现，既追赶最新画面，也保留一帧余量维持 60 Hz 连续性。
+        const auto decision = DecideDecoderOutput(
+            latencyUs, maximumOutputAgeUs_, newerFrameCount >= 2);
+        OH_AVErrCode result = AV_ERR_OK;
+        if (!decision.render) {
+            result = OH_VideoDecoder_FreeOutputBuffer(codec, index);
+        } else {
+            result = OH_VideoDecoder_RenderOutputBuffer(codec, index);
+        }
         if (result == AV_ERR_OK) {
             if (!decision.render) {
                 staleOutputDrops_ += 1;
@@ -394,7 +414,11 @@ std::optional<std::string> H264SurfaceDecoder::DrainLocked()
             running_ = false;
             return "DECODER_FATAL: decoder input buffer is invalid or too small";
         }
-        std::memcpy(destination, frame->frame.payload.data(), frame->frame.payload.size());
+        // payload 直接引用解析器的有界 backing；这里是进入 AVCodec 前唯一一次 payload copy。
+        if (!frame->frame.payload.CopyTo(destination, static_cast<std::size_t>(capacity))) {
+            running_ = false;
+            return "DECODER_FATAL: unable to copy decoder input payload";
+        }
         OH_AVCodecBufferAttr attributes {
             .pts = static_cast<std::int64_t>(frame->frame.ptsUs),
             .size = static_cast<std::int32_t>(frame->frame.payload.size()),

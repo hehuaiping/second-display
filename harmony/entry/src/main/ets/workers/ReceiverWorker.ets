@@ -42,6 +42,9 @@ interface ReceiverFeedbackCommand {
   decoderQueueDepth: number
   droppedFrames: number
   renderedFramesPerSecond: number
+  displayFramesPerSecond: number
+  displayIntervalP95Us: number
+  decodeOutputP95Us: number
   networkType: string
 }
 
@@ -439,6 +442,9 @@ function sendReceiverFeedback(command: ReceiverFeedbackCommand, activeGeneration
     decoderQueueDepth: Math.max(0, Math.min(Math.floor(command.decoderQueueDepth), 64)),
     droppedFrames: Math.max(0, Math.floor(command.droppedFrames)),
     renderedFramesPerSecond: Math.max(0, Math.min(command.renderedFramesPerSecond, 240)),
+    displayFramesPerSecond: Math.max(0, Math.min(command.displayFramesPerSecond, 240)),
+    displayIntervalP95Us: Math.max(0, Math.min(Math.floor(command.displayIntervalP95Us), 1000000)),
+    decodeOutputP95Us: Math.max(0, Math.min(Math.floor(command.decodeOutputP95Us), 2000000)),
     networkType: command.networkType.length > 0 ? command.networkType : 'unknown'
   })
   enqueueControlWrite(

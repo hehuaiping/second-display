@@ -231,7 +231,9 @@ public struct EncodedFrame: Equatable, Sendable {
 public struct MediaMetricsSnapshot: Equatable, Sendable {
     public let captureDropCount: UInt64
     public let encodeDropCount: UInt64
+    public let encodeDropBreakdown: EncodeDropBreakdown
     public let sendDropCount: UInt64
+    public let capturedFrameCount: UInt64
     public let encodedFrameCount: UInt64
     public let captureDeliveryP50Milliseconds: Double
     public let captureDeliveryP95Milliseconds: Double
@@ -250,6 +252,52 @@ public struct MediaMetricsSnapshot: Equatable, Sendable {
     public let dirtyAreaP95Percent: Double
     public let currentBitrate: Int
     public let contentActivity: ContentActivity
+}
+
+public enum EncodeDropReason: Sendable {
+    case staleBeforeEncode
+    case queueReplacement
+    case encoderRejected
+    case recoveryDiscard
+    case failure
+    case unspecified
+}
+
+/// 将编码阶段丢帧按原因拆分，避免把码率受限、应用排队和恢复门禁混为同一种压力。
+/// `encodeDropCount` 继续作为兼容的总计数，详细计数用于诊断和自适应决策。
+public struct EncodeDropBreakdown: Equatable, Sendable {
+    public internal(set) var staleBeforeEncode: UInt64 = 0
+    public internal(set) var queueReplacement: UInt64 = 0
+    public internal(set) var encoderRejected: UInt64 = 0
+    public internal(set) var recoveryDiscard: UInt64 = 0
+    public internal(set) var failure: UInt64 = 0
+    public internal(set) var unspecified: UInt64 = 0
+
+    public var total: UInt64 {
+        staleBeforeEncode
+            &+ queueReplacement
+            &+ encoderRejected
+            &+ recoveryDiscard
+            &+ failure
+            &+ unspecified
+    }
+
+    mutating func record(_ reason: EncodeDropReason, count: UInt64) {
+        switch reason {
+        case .staleBeforeEncode:
+            staleBeforeEncode &+= count
+        case .queueReplacement:
+            queueReplacement &+= count
+        case .encoderRejected:
+            encoderRejected &+= count
+        case .recoveryDiscard:
+            recoveryDiscard &+= count
+        case .failure:
+            failure &+= count
+        case .unspecified:
+            unspecified &+= count
+        }
+    }
 }
 
 /// 固定窗口直方图避免长时间推流时反复 `removeFirst` 和排序整组样本。
@@ -311,6 +359,7 @@ public actor MediaPipelineMetrics {
 
     private var captureDrops: UInt64 = 0
     private var encodeDrops: UInt64 = 0
+    private var encodeDropBreakdown = EncodeDropBreakdown()
     private var sendDrops: UInt64 = 0
     private var captureDeliveryLatenciesUs: SlidingHistogram
     private var encodeQueueLatenciesUs: SlidingHistogram
@@ -321,10 +370,14 @@ public actor MediaPipelineMetrics {
     private var lowLatencyRateControlEnabled: Bool?
     private var sendQueueLatenciesUs: SlidingHistogram
     private var dirtyAreaPermille: SlidingHistogram
+    private var totalCapturedFrames: UInt64 = 0
+    private var totalEncodedFrames: UInt64 = 0
     private var currentBitrate = 0
     private var contentActivity: ContentActivity = .active
 
-    public init(sampleCapacity: Int = 4_096) {
+    /// 默认 600 个样本对应 60 FPS 下约 10 秒、120 FPS 下约 5 秒。
+    /// 总帧数单独累计，滑动窗口只负责反映近期延迟。
+    public init(sampleCapacity: Int = 600) {
         let capacity = max(1, sampleCapacity)
         captureDeliveryLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
         encodeQueueLatenciesUs = Self.makeLatencyHistogram(capacity: capacity)
@@ -342,8 +395,17 @@ public actor MediaPipelineMetrics {
         captureDrops &+= count
     }
 
+    public func recordCaptureObserved() {
+        totalCapturedFrames &+= 1
+    }
+
     public func recordEncodeDrop(count: UInt64 = 1) {
+        recordEncodeDrop(reason: .unspecified, count: count)
+    }
+
+    public func recordEncodeDrop(reason: EncodeDropReason, count: UInt64 = 1) {
         encodeDrops &+= count
+        encodeDropBreakdown.record(reason, count: count)
     }
 
     public func recordSendDrop(count: UInt64 = 1) {
@@ -370,6 +432,7 @@ public actor MediaPipelineMetrics {
         encoderHardwareAccelerated: Bool? = nil,
         lowLatencyRateControlEnabled: Bool? = nil
     ) {
+        totalEncodedFrames &+= 1
         append(latencyUs, to: &encodeLatenciesUs)
         if let videoToolboxLatencyUs {
             append(videoToolboxLatencyUs, to: &videoToolboxLatenciesUs)
@@ -404,8 +467,10 @@ public actor MediaPipelineMetrics {
         return MediaMetricsSnapshot(
             captureDropCount: captureDrops,
             encodeDropCount: encodeDrops,
+            encodeDropBreakdown: encodeDropBreakdown,
             sendDropCount: sendDrops,
-            encodedFrameCount: UInt64(encodeLatenciesUs.sampleCount),
+            capturedFrameCount: totalCapturedFrames,
+            encodedFrameCount: totalEncodedFrames,
             captureDeliveryP50Milliseconds: milliseconds(
                 captureDeliveryLatenciesUs.percentile(0.50)),
             captureDeliveryP95Milliseconds: milliseconds(

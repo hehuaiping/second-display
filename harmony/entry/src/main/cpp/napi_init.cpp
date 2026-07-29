@@ -22,6 +22,12 @@
 
 namespace {
 
+std::uint64_t MonotonicNanoseconds()
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
 struct DecoderStatus {
     std::string code;
     bool running = false;
@@ -35,12 +41,23 @@ struct DecoderStatus {
     std::uint64_t inputQueueLatencyUs = 0;
     std::uint64_t decodeLatencyUs = 0;
     std::uint64_t outputLatencyUs = 0;
+    std::uint64_t decodeOutputP95Us = 0;
     std::uint64_t decoderInFlight = 0;
+    std::uint64_t displayFrames = 0;
+    double displayFramesPerSecond = 0;
+    std::uint64_t displayIntervalP95Us = 0;
     std::uint64_t keyFrameRequests = 0;
     std::uint64_t decoderRecoveries = 0;
     bool lowLatencyEnabled = false;
     bool immediateRenderingEnabled = true;
+    bool timedRenderingEnabled = false;
+    bool boundedBufferCountsEnabled = false;
+    bool displayFrameSamplingEnabled = false;
+    bool expectedFrameRateApplied = false;
 };
+
+void OnDisplayFrame(
+    OH_NativeXComponent* component, std::uint64_t timestamp, std::uint64_t targetTimestamp);
 
 class ReceiverRuntime {
 public:
@@ -57,26 +74,47 @@ public:
         decoder_.Stop();
     }
 
-    void SurfaceCreated(void* window)
+    void AttachComponent(OH_NativeXComponent* component)
     {
-        SetSurface(static_cast<OHNativeWindow*>(window));
+        std::lock_guard lock(stateMutex_);
+        component_ = component;
     }
 
-    void SurfaceChanged(void* window)
+    void SurfaceCreated(OH_NativeXComponent* component, void* window)
     {
+        AttachComponent(component);
         SetSurface(static_cast<OHNativeWindow*>(window));
+        ConfigureDisplaySampling();
     }
 
-    void SurfaceDestroyed(void* window)
+    void SurfaceChanged(OH_NativeXComponent* component, void* window)
+    {
+        AttachComponent(component);
+        SetSurface(static_cast<OHNativeWindow*>(window));
+        ConfigureDisplaySampling();
+    }
+
+    void SurfaceDestroyed(OH_NativeXComponent* component, void* window)
     {
         StopTestPlayer();
+        OH_NativeXComponent* callbackComponent = nullptr;
         {
             std::lock_guard lock(stateMutex_);
-            if (window_ != static_cast<OHNativeWindow*>(window)) return;
+            if (window_ != static_cast<OHNativeWindow*>(window) || component_ != component) return;
             window_ = nullptr;
+            callbackComponent = component_;
+            component_ = nullptr;
             generation_ += 1;
+            displaySamplingGeneration_ = generation_;
+            frameCallbackRegistered_ = false;
+            expectedFrameRateApplied_ = false;
+            ResetDisplayStatisticsLocked();
             keyFrameRequestPending_ = false;
             statusCode_ = "WAITING_SURFACE";
+        }
+        if (callbackComponent != nullptr) {
+            std::lock_guard componentLock(componentOperationMutex_);
+            OH_NativeXComponent_UnregisterOnFrameCallback(callbackComponent);
         }
         std::lock_guard operationLock(operationMutex_);
         decoder_.Stop();
@@ -91,6 +129,7 @@ public:
             window = window_;
         }
         SetSurface(window);
+        ConfigureDisplaySampling();
     }
 
     void Stop()
@@ -110,14 +149,23 @@ public:
     {
         const auto decoderStatistics = decoder_.GetStatistics();
         std::lock_guard lock(stateMutex_);
+        const auto displayIntervalAverageNs = displayIntervalsNs_.Average();
+        const auto displayFramesPerSecond = displayIntervalAverageNs > 0
+            ? 1'000'000'000.0 / displayIntervalAverageNs : 0;
         return {
             statusCode_, decoder_.IsRunning(), generation_, testFrames_,
             droppedFrames_ + decoderStatistics.staleOutputDrops, networkFrames_,
             decoderStatistics.decodedFrames, decoderStatistics.renderedFrames,
             decoderStatistics.staleOutputDrops, decoderStatistics.lastInputQueueLatencyUs,
             decoderStatistics.lastDecodeLatencyUs, decoderStatistics.lastOutputLatencyUs,
-            decoderStatistics.inFlightFrames, keyFrameRequests_, decoderRecoveries_,
-            decoderStatistics.lowLatencyEnabled, decoderStatistics.immediateRenderingEnabled};
+            decoderStatistics.decodeOutputP95Us, decoderStatistics.inFlightFrames,
+            displayFrames_, displayFramesPerSecond,
+            displayIntervalsNs_.Percentile(0.95) / 1'000,
+            keyFrameRequests_, decoderRecoveries_,
+            decoderStatistics.lowLatencyEnabled, decoderStatistics.immediateRenderingEnabled,
+            decoderStatistics.timedRenderingEnabled,
+            decoderStatistics.boundedBufferCountsEnabled,
+            frameCallbackRegistered_, expectedFrameRateApplied_};
     }
 
     void BeginVideoSession(
@@ -167,9 +215,12 @@ public:
             decoder_.ResetStatistics();
             configured = decoder_.Configure(window, width, height, framesPerSecond, codec, generation, error);
         }
-        std::lock_guard lock(stateMutex_);
-        if (generation != generation_ || window != window_) return;
-        statusCode_ = configured ? "STREAM_READY" : std::move(error);
+        {
+            std::lock_guard lock(stateMutex_);
+            if (generation != generation_ || window != window_) return;
+            statusCode_ = configured ? "STREAM_READY" : std::move(error);
+        }
+        ConfigureDisplaySampling();
     }
 
     void FeedVideoBytes(const std::string& sessionId, const std::uint8_t* bytes, std::size_t size)
@@ -187,21 +238,8 @@ public:
             RecordProtocolError(parsed.detail);
             return;
         }
-        for (auto& frame : parsed.frames) {
-            const bool keyFrame = (frame.flags & 1U) != 0;
-            const auto nowUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
-                std::chrono::steady_clock::now().time_since_epoch()).count());
-            const auto result = decoder_.Submit(std::move(frame), nowUs);
-            {
-                std::lock_guard lock(stateMutex_);
-                if (result.accepted) networkFrames_ += 1;
-                droppedFrames_ += result.droppedFrames;
-                if (result.accepted && keyFrame) {
-                    keyFrameRequestPending_ = false;
-                    if (decoder_.IsRunning()) statusCode_ = "STREAM_READY";
-                }
-            }
-        }
+        // 保持原有先解析、解锁、再提交的时序，避免 parser 锁扩大到硬件解码回调。
+        for (auto& frame : parsed.frames) SubmitNetworkFrame(std::move(frame));
     }
 
     void FinishVideoSession(const std::string& sessionId)
@@ -268,7 +306,41 @@ public:
         statusCode_ = "NET_PROTOCOL_MISMATCH: " + std::move(detail);
     }
 
+    void RecordDisplayFrame(
+        OH_NativeXComponent* component,
+        std::uint64_t timestamp,
+        std::uint64_t targetTimestamp)
+    {
+        std::lock_guard lock(stateMutex_);
+        if (!frameCallbackRegistered_ || component_ != component
+            || displaySamplingGeneration_ != generation_
+            || timestamp < frameCallbackMinimumTimestampNs_) {
+            return;
+        }
+        if (lastDisplayFrameTimestampNs_ > 0 && timestamp > lastDisplayFrameTimestampNs_) {
+            displayIntervalsNs_.Add(timestamp - lastDisplayFrameTimestampNs_);
+        }
+        lastDisplayFrameTimestampNs_ = timestamp;
+        lastDisplayTargetTimestampNs_ = targetTimestamp;
+        displayFrames_ += 1;
+    }
+
 private:
+    void SubmitNetworkFrame(second_display::protocol::VideoFrame frame)
+    {
+        const bool keyFrame = (frame.flags & 1U) != 0;
+        const auto nowUs = static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::microseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+        const auto result = decoder_.Submit(std::move(frame), nowUs);
+        std::lock_guard lock(stateMutex_);
+        if (result.accepted) networkFrames_ += 1;
+        droppedFrames_ += result.droppedFrames;
+        if (result.accepted && keyFrame) {
+            keyFrameRequestPending_ = false;
+            if (decoder_.IsRunning()) statusCode_ = "STREAM_READY";
+        }
+    }
+
     void SetSurface(OHNativeWindow* window)
     {
         StopTestPlayer();
@@ -301,6 +373,65 @@ private:
         std::lock_guard lock(stateMutex_);
         if (generation != generation_ || window != window_) return;
         statusCode_ = configured ? "READY" : std::move(error);
+    }
+
+    void ConfigureDisplaySampling()
+    {
+        OH_NativeXComponent* component = nullptr;
+        std::uint64_t generation = 0;
+        std::int32_t expectedFramesPerSecond = 60;
+        bool callbackWasRegistered = false;
+        {
+            std::lock_guard lock(stateMutex_);
+            if (component_ == nullptr || window_ == nullptr) return;
+            component = component_;
+            generation = generation_;
+            expectedFramesPerSecond = static_cast<std::int32_t>(
+                std::clamp(std::lround(decoderFramesPerSecond_), 1L, 120L));
+            displaySamplingGeneration_ = generation;
+            frameCallbackMinimumTimestampNs_ = MonotonicNanoseconds();
+            ResetDisplayStatisticsLocked();
+            callbackWasRegistered = frameCallbackRegistered_;
+        }
+
+        OH_NativeXComponent_ExpectedRateRange range {
+            .min = expectedFramesPerSecond,
+            .max = expectedFramesPerSecond,
+            .expected = expectedFramesPerSecond,
+        };
+        bool rateApplied = false;
+        bool callbackRegistered = false;
+        {
+            std::lock_guard componentLock(componentOperationMutex_);
+            rateApplied =
+                OH_NativeXComponent_SetExpectedFrameRateRange(component, &range)
+                == OH_NATIVEXCOMPONENT_RESULT_SUCCESS;
+            callbackRegistered = callbackWasRegistered
+                || OH_NativeXComponent_RegisterOnFrameCallback(component, OnDisplayFrame)
+                    == OH_NATIVEXCOMPONENT_RESULT_SUCCESS;
+        }
+
+        bool stale = false;
+        {
+            std::lock_guard lock(stateMutex_);
+            stale = component_ != component || generation_ != generation || window_ == nullptr;
+            if (!stale) {
+                expectedFrameRateApplied_ = rateApplied;
+                frameCallbackRegistered_ = callbackRegistered;
+            }
+        }
+        if (stale && callbackRegistered) {
+            std::lock_guard componentLock(componentOperationMutex_);
+            OH_NativeXComponent_UnregisterOnFrameCallback(component);
+        }
+    }
+
+    void ResetDisplayStatisticsLocked()
+    {
+        displayFrames_ = 0;
+        lastDisplayFrameTimestampNs_ = 0;
+        lastDisplayTargetTimestampNs_ = 0;
+        displayIntervalsNs_.Reset();
     }
 
     void RecordKeyFrameRequest()
@@ -388,9 +519,19 @@ private:
 
     mutable std::mutex stateMutex_;
     std::mutex operationMutex_;
+    std::mutex componentOperationMutex_;
     second_display::decoder::H264SurfaceDecoder decoder_;
     OHNativeWindow* window_ = nullptr;
+    OH_NativeXComponent* component_ = nullptr;
     std::uint64_t generation_ = 0;
+    std::uint64_t displaySamplingGeneration_ = 0;
+    std::uint64_t frameCallbackMinimumTimestampNs_ = 0;
+    std::uint64_t displayFrames_ = 0;
+    std::uint64_t lastDisplayFrameTimestampNs_ = 0;
+    std::uint64_t lastDisplayTargetTimestampNs_ = 0;
+    second_display::decoder::LatencyWindow<256> displayIntervalsNs_;
+    bool frameCallbackRegistered_ = false;
+    bool expectedFrameRateApplied_ = false;
     std::string statusCode_ = "WAITING_SURFACE";
 #if defined(SECOND_DISPLAY_ENABLE_DIAGNOSTICS)
     std::atomic<bool> testStop_ = true;
@@ -420,19 +561,25 @@ ReceiverRuntime& Runtime()
     return runtime;
 }
 
-void OnSurfaceCreated(OH_NativeXComponent*, void* window)
+void OnSurfaceCreated(OH_NativeXComponent* component, void* window)
 {
-    Runtime().SurfaceCreated(window);
+    Runtime().SurfaceCreated(component, window);
 }
 
-void OnSurfaceChanged(OH_NativeXComponent*, void* window)
+void OnSurfaceChanged(OH_NativeXComponent* component, void* window)
 {
-    Runtime().SurfaceChanged(window);
+    Runtime().SurfaceChanged(component, window);
 }
 
-void OnSurfaceDestroyed(OH_NativeXComponent*, void* window)
+void OnSurfaceDestroyed(OH_NativeXComponent* component, void* window)
 {
-    Runtime().SurfaceDestroyed(window);
+    Runtime().SurfaceDestroyed(component, window);
+}
+
+void OnDisplayFrame(
+    OH_NativeXComponent* component, std::uint64_t timestamp, std::uint64_t targetTimestamp)
+{
+    Runtime().RecordDisplayFrame(component, timestamp, targetTimestamp);
 }
 
 OH_NativeXComponent_Callback g_surfaceCallbacks {
@@ -458,11 +605,19 @@ napi_value StatusObject(napi_env env)
     napi_value inputQueueLatencyUs = nullptr;
     napi_value decodeLatencyUs = nullptr;
     napi_value outputLatencyUs = nullptr;
+    napi_value decodeOutputP95Us = nullptr;
     napi_value decoderInFlight = nullptr;
+    napi_value displayFrames = nullptr;
+    napi_value displayFramesPerSecond = nullptr;
+    napi_value displayIntervalP95Us = nullptr;
     napi_value keyFrameRequests = nullptr;
     napi_value decoderRecoveries = nullptr;
     napi_value lowLatencyEnabled = nullptr;
     napi_value immediateRenderingEnabled = nullptr;
+    napi_value timedRenderingEnabled = nullptr;
+    napi_value boundedBufferCountsEnabled = nullptr;
+    napi_value displayFrameSamplingEnabled = nullptr;
+    napi_value expectedFrameRateApplied = nullptr;
     if (napi_create_object(env, &result) != napi_ok
         || napi_create_string_utf8(env, status.code.c_str(), status.code.size(), &code) != napi_ok
         || napi_get_boolean(env, status.running, &running) != napi_ok
@@ -476,11 +631,20 @@ napi_value StatusObject(napi_env env)
         || napi_create_double(env, static_cast<double>(status.inputQueueLatencyUs), &inputQueueLatencyUs) != napi_ok
         || napi_create_double(env, static_cast<double>(status.decodeLatencyUs), &decodeLatencyUs) != napi_ok
         || napi_create_double(env, static_cast<double>(status.outputLatencyUs), &outputLatencyUs) != napi_ok
+        || napi_create_double(env, static_cast<double>(status.decodeOutputP95Us), &decodeOutputP95Us) != napi_ok
         || napi_create_double(env, static_cast<double>(status.decoderInFlight), &decoderInFlight) != napi_ok
+        || napi_create_double(env, static_cast<double>(status.displayFrames), &displayFrames) != napi_ok
+        || napi_create_double(env, status.displayFramesPerSecond, &displayFramesPerSecond) != napi_ok
+        || napi_create_double(
+            env, static_cast<double>(status.displayIntervalP95Us), &displayIntervalP95Us) != napi_ok
         || napi_create_double(env, static_cast<double>(status.keyFrameRequests), &keyFrameRequests) != napi_ok
         || napi_create_double(env, static_cast<double>(status.decoderRecoveries), &decoderRecoveries) != napi_ok
         || napi_get_boolean(env, status.lowLatencyEnabled, &lowLatencyEnabled) != napi_ok
-        || napi_get_boolean(env, status.immediateRenderingEnabled, &immediateRenderingEnabled) != napi_ok) {
+        || napi_get_boolean(env, status.immediateRenderingEnabled, &immediateRenderingEnabled) != napi_ok
+        || napi_get_boolean(env, status.timedRenderingEnabled, &timedRenderingEnabled) != napi_ok
+        || napi_get_boolean(env, status.boundedBufferCountsEnabled, &boundedBufferCountsEnabled) != napi_ok
+        || napi_get_boolean(env, status.displayFrameSamplingEnabled, &displayFrameSamplingEnabled) != napi_ok
+        || napi_get_boolean(env, status.expectedFrameRateApplied, &expectedFrameRateApplied) != napi_ok) {
         return nullptr;
     }
     if (napi_set_named_property(env, result, "code", code) != napi_ok
@@ -495,11 +659,24 @@ napi_value StatusObject(napi_env env)
         || napi_set_named_property(env, result, "inputQueueLatencyUs", inputQueueLatencyUs) != napi_ok
         || napi_set_named_property(env, result, "decodeLatencyUs", decodeLatencyUs) != napi_ok
         || napi_set_named_property(env, result, "outputLatencyUs", outputLatencyUs) != napi_ok
+        || napi_set_named_property(env, result, "decodeOutputP95Us", decodeOutputP95Us) != napi_ok
         || napi_set_named_property(env, result, "decoderInFlight", decoderInFlight) != napi_ok
+        || napi_set_named_property(env, result, "displayFrames", displayFrames) != napi_ok
+        || napi_set_named_property(
+            env, result, "displayFramesPerSecond", displayFramesPerSecond) != napi_ok
+        || napi_set_named_property(
+            env, result, "displayIntervalP95Us", displayIntervalP95Us) != napi_ok
         || napi_set_named_property(env, result, "keyFrameRequests", keyFrameRequests) != napi_ok
         || napi_set_named_property(env, result, "decoderRecoveries", decoderRecoveries) != napi_ok
         || napi_set_named_property(env, result, "lowLatencyEnabled", lowLatencyEnabled) != napi_ok
-        || napi_set_named_property(env, result, "immediateRenderingEnabled", immediateRenderingEnabled) != napi_ok) {
+        || napi_set_named_property(env, result, "immediateRenderingEnabled", immediateRenderingEnabled) != napi_ok
+        || napi_set_named_property(env, result, "timedRenderingEnabled", timedRenderingEnabled) != napi_ok
+        || napi_set_named_property(
+            env, result, "boundedBufferCountsEnabled", boundedBufferCountsEnabled) != napi_ok
+        || napi_set_named_property(
+            env, result, "displayFrameSamplingEnabled", displayFrameSamplingEnabled) != napi_ok
+        || napi_set_named_property(
+            env, result, "expectedFrameRateApplied", expectedFrameRateApplied) != napi_ok) {
         return nullptr;
     }
     return result;
@@ -707,6 +884,7 @@ napi_value Initialize(napi_env env, napi_value exports)
     if (napi_get_named_property(env, exports, OH_NATIVE_XCOMPONENT_OBJ, &xcomponentValue) == napi_ok
         && napi_unwrap(env, xcomponentValue, reinterpret_cast<void**>(&component)) == napi_ok
         && component != nullptr) {
+        Runtime().AttachComponent(component);
         if (OH_NativeXComponent_RegisterCallback(component, &g_surfaceCallbacks) != 0) {
             Runtime().RecordRegistrationFailure();
         }

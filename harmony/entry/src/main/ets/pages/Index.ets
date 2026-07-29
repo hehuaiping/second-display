@@ -59,10 +59,17 @@ struct Index {
   @State private inputQueueLatencyMs: number = 0
   @State private decodeLatencyMs: number = 0
   @State private outputLatencyMs: number = 0
+  @State private decodeOutputP95Ms: number = 0
   @State private decoderRecoveries: number = 0
   @State private keyFrameRequests: number = 0
   @State private lowLatencyEnabled: boolean = false
   @State private immediateRenderingEnabled: boolean = true
+  @State private timedRenderingEnabled: boolean = false
+  @State private boundedBufferCountsEnabled: boolean = false
+  @State private displayFrameSamplingEnabled: boolean = false
+  @State private expectedFrameRateApplied: boolean = false
+  @State private displayFramesPerSecond: number = 0
+  @State private displayIntervalP95Ms: number = 0
   @State private realTimeFps: number = 0
   @State private systemDisplayWidth: number = 0
   @State private systemDisplayHeight: number = 0
@@ -976,10 +983,17 @@ struct Index {
     this.inputQueueLatencyMs = Math.round(status.inputQueueLatencyUs / 100) / 10
     this.decodeLatencyMs = Math.round(status.decodeLatencyUs / 100) / 10
     this.outputLatencyMs = Math.round(status.outputLatencyUs / 100) / 10
+    this.decodeOutputP95Ms = Math.round(status.decodeOutputP95Us / 100) / 10
     this.decoderRecoveries = status.decoderRecoveries
     this.keyFrameRequests = status.keyFrameRequests
     this.lowLatencyEnabled = status.lowLatencyEnabled
     this.immediateRenderingEnabled = status.immediateRenderingEnabled
+    this.timedRenderingEnabled = status.timedRenderingEnabled
+    this.boundedBufferCountsEnabled = status.boundedBufferCountsEnabled
+    this.displayFrameSamplingEnabled = status.displayFrameSamplingEnabled
+    this.expectedFrameRateApplied = status.expectedFrameRateApplied
+    this.displayFramesPerSecond = Math.round(status.displayFramesPerSecond * 10) / 10
+    this.displayIntervalP95Ms = Math.round(status.displayIntervalP95Us / 100) / 10
     if (canPromoteSurfaceReady(this.connectionCode, status.running, status.code)) {
       this.applyConnectionCode('STREAM_READY')
     }
@@ -1006,12 +1020,18 @@ struct Index {
     if (!this.isStreamReady() || this.receiverWorker === undefined
       || nowMs - this.previousFeedbackAtMs < 1000) return
     this.previousFeedbackAtMs = nowMs
+    const effectivePresentationFps: number = status.displayFramesPerSecond > 0
+      ? Math.min(this.realTimeFps, status.displayFramesPerSecond)
+      : this.realTimeFps
     try {
       this.receiverWorker.postMessage({
         type: 'receiverFeedback',
         decoderQueueDepth: status.decoderInFlight,
         droppedFrames: status.droppedFrames,
-        renderedFramesPerSecond: this.realTimeFps,
+        renderedFramesPerSecond: effectivePresentationFps,
+        displayFramesPerSecond: status.displayFramesPerSecond,
+        displayIntervalP95Us: status.displayIntervalP95Us,
+        decodeOutputP95Us: status.decodeOutputP95Us,
         networkType: this.currentNetworkType()
       })
     } catch (error) {
@@ -1521,12 +1541,12 @@ struct Index {
                 .fontWeight(FontWeight.Medium)
                 .fontColor(Color.White)
               Text(
-                `${this.decoderCode} · 总接收帧 ${this.networkFrames} · 实时渲染 ${this.realTimeFps.toFixed(1)} FPS`
+                `${this.decoderCode} · 总接收帧 ${this.networkFrames} · 解码提交 ${this.realTimeFps.toFixed(1)} FPS · 显示回调 ${this.displayFramesPerSecond.toFixed(1)} FPS`
               )
                 .fontSize(10)
                 .fontColor('#DCE7F5')
               Text(
-                `解码 ${this.decodedFrames} · in-flight ${this.decoderInFlight} · 排队/解码/接收 ${this.inputQueueLatencyMs.toFixed(1)}/${this.decodeLatencyMs.toFixed(1)}/${this.outputLatencyMs.toFixed(1)} ms · 低延迟 ${this.lowLatencyEnabled ? '开' : '关'} · ${this.immediateRenderingEnabled ? '立即呈现' : '定时呈现'} · 过期丢弃 ${this.staleOutputDrops} · IDR请求 ${this.keyFrameRequests} · 恢复 ${this.decoderRecoveries}`
+                `解码 ${this.decodedFrames} · in-flight ${this.decoderInFlight} · 排队/解码/接收 ${this.inputQueueLatencyMs.toFixed(1)}/${this.decodeLatencyMs.toFixed(1)}/${this.outputLatencyMs.toFixed(1)} ms · 解码输出P95 ${this.decodeOutputP95Ms.toFixed(1)} ms · 显示间隔P95 ${this.displayIntervalP95Ms.toFixed(1)} ms · 低延迟 ${this.lowLatencyEnabled ? '开' : '关'} · ${this.timedRenderingEnabled ? 'VSync合并' : '立即呈现'} · 缓冲限深 ${this.boundedBufferCountsEnabled ? '开' : '回退'} · 刷新请求 ${this.expectedFrameRateApplied && this.displayFrameSamplingEnabled ? '生效' : '回退'} · 过期丢弃 ${this.staleOutputDrops} · IDR请求 ${this.keyFrameRequests} · 恢复 ${this.decoderRecoveries}`
               )
                 .fontSize(9)
                 .fontColor('#BFCDE0')

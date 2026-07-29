@@ -62,7 +62,11 @@ public actor CaptureEncoderPipeline {
         let frameDurationUs = UInt64(
             (1_000_000 + encoderConfiguration.framesPerSecond - 1)
                 / encoderConfiguration.framesPerSecond)
-        let maximumPreEncodeAgeUs = max(UInt64(20_000), frameDurationUs * 2)
+        let maximumCallbackQueueAgeUs = max(UInt64(20_000), frameDurationUs * 2)
+        // ScreenCaptureKit 的 displayTime 包含系统合成和交付成本，并不等同于应用队列年龄。
+        // 全分辨率真机压力下它会稳定略超两帧；继续使用两帧门会周期性误丢约一半输入。
+        // 应用内部 callback 排队仍限制两帧，系统捕获交付单独放宽到三帧且保持有界。
+        let maximumCaptureDeliveryAgeUs = max(UInt64(33_000), frameDurationUs * 3)
 
         // 采集侧只保留最新一帧：桌面串流宁可丢弃过期画面，也不能让队列累积成可感知延迟。
         let producer = Task(priority: .userInitiated) {
@@ -70,6 +74,7 @@ public actor CaptureEncoderPipeline {
                 for try await frame in frames {
                     try Task.checkCancellation()
                     guard frame.generation == generation else { throw CancellationError() }
+                    await metrics.recordCaptureObserved()
                     let nowUs = monotonicMicroseconds()
                     let callbackAgeUs =
                         nowUs >= frame.callbackTimestampUs
@@ -77,10 +82,10 @@ public actor CaptureEncoderPipeline {
                     let captureAgeUs =
                         frame.captureTimestampUs > 0 && nowUs >= frame.captureTimestampUs
                         ? nowUs - frame.captureTimestampUs : 0
-                    if callbackAgeUs > maximumPreEncodeAgeUs
-                        || captureAgeUs > maximumPreEncodeAgeUs
+                    if callbackAgeUs > maximumCallbackQueueAgeUs
+                        || captureAgeUs > maximumCaptureDeliveryAgeUs
                     {
-                        await metrics.recordEncodeDrop()
+                        await metrics.recordEncodeDrop(reason: .staleBeforeEncode)
                         await state.markDiscontinuity()
                         continue
                     }
@@ -91,7 +96,7 @@ public actor CaptureEncoderPipeline {
                         }
                     }
                     if case .dropped = framePair.continuation.yield(frame) {
-                        await metrics.recordEncodeDrop()
+                        await metrics.recordEncodeDrop(reason: .queueReplacement)
                         if await state.markDiscontinuity() {
                             let removed = await sendQueue.discardNonKeyFrames()
                             if removed > 0 { await metrics.recordSendDrop(count: UInt64(removed)) }
@@ -149,17 +154,17 @@ public actor CaptureEncoderPipeline {
                 do {
                     guard let encoded = try await videoEncoder.encode(frame, forceKeyFrame: forceKeyFrame)
                     else {
-                        await metrics.recordEncodeDrop()
+                        await metrics.recordEncodeDrop(reason: .encoderRejected)
                         await state.markDiscontinuity()
                         continue
                     }
                     guard encoded.generation == generation else { break }
                     guard await state.isCurrent(request.version) else {
-                        await metrics.recordEncodeDrop()
+                        await metrics.recordEncodeDrop(reason: .recoveryDiscard)
                         continue
                     }
                     if forceKeyFrame, !encoded.isKeyFrame {
-                        await metrics.recordEncodeDrop()
+                        await metrics.recordEncodeDrop(reason: .recoveryDiscard)
                         await state.markDiscontinuity()
                         continue
                     }
@@ -187,7 +192,7 @@ public actor CaptureEncoderPipeline {
                 } catch is CancellationError {
                     break
                 } catch {
-                    await metrics.recordEncodeDrop()
+                    await metrics.recordEncodeDrop(reason: .failure)
                     await state.markDiscontinuity()
                     await onFailure(error)
                     break

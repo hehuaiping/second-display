@@ -29,8 +29,8 @@ public enum VideoEncoderCapability {
 }
 
 struct VideoEncoderRateControlPlan: Equatable, Sendable {
-    static let lowLatencyBurstNumerator = 5
-    static let lowLatencyBurstDenominator = 4
+    static let lowLatencyBurstNumerator = 2
+    static let lowLatencyBurstDenominator = 1
 
     let maximumKeyFrameIntervalFrames: Int?
     let maximumKeyFrameIntervalDurationSeconds: Int?
@@ -50,8 +50,8 @@ struct VideoEncoderRateControlPlan: Equatable, Sendable {
 
         let averageBytesPerSecond = max(1, spec.bitrate / 8)
         if lowLatencyRateControlEnabled {
-            // AverageBitRate 仍控制长期均值，DataRateLimits 仅留出 25% 短时突发空间，
-            // 防止复杂桌面/显式 IDR 被一秒硬上限阻塞，同时保持网络流量有界。
+            // AverageBitRate 仍控制长期均值，DataRateLimits 允许一秒窗口内最多 2 倍突发。
+            // 复杂桌面动画和显式 IDR 不应因瞬时码量被编码器主动隔帧丢弃；发送队列仍保持有界。
             dataRateLimitBytesPerSecond =
                 averageBytesPerSecond * Self.lowLatencyBurstNumerator
                 / Self.lowLatencyBurstDenominator

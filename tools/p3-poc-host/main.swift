@@ -52,6 +52,18 @@ struct P3PoCHost {
         let maximumFramesPerSecond =
             ProcessInfo.processInfo.environment["P3_POC_MAX_FPS"]
             .flatMap(Int.init) ?? 60
+        let allowsAdaptiveResolution: Bool
+        switch ProcessInfo.processInfo.environment["P3_POC_ADAPTIVE_RESOLUTION"] {
+        case nil, "0":
+            allowsAdaptiveResolution = false
+        case "1":
+            allowsAdaptiveResolution = true
+        default:
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "P3_POC_ADAPTIVE_RESOLUTION must be 0 or 1"
+            )
+        }
         let showsAnimatedTestPattern: Bool
         switch ProcessInfo.processInfo.environment["P3_POC_ANIMATED_TEST_PATTERN"] {
         case nil, "1":
@@ -69,7 +81,8 @@ struct P3PoCHost {
             identityPassword: password,
             durationSeconds: duration,
             showsAnimatedTestPattern: showsAnimatedTestPattern,
-            maximumFramesPerSecond: maximumFramesPerSecond
+            maximumFramesPerSecond: maximumFramesPerSecond,
+            allowsAdaptiveResolution: allowsAdaptiveResolution
         )
         let service = P3HostService()
         let printer = CLIEventPrinter()

@@ -2,8 +2,8 @@
   "app": {
     "bundleName": "cloud.cuihua.display",
     "vendor": "何怀平",
-    "versionCode": 1001000,
-    "versionName": "1.1.0",
+    "versionCode": 1002000,
+    "versionName": "1.2.0",
     "icon": "$media:app_icon",
     "label": "$string:app_name"
   }

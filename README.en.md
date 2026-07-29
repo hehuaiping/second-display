@@ -10,17 +10,18 @@ while the HarmonyOS app hardware-decodes the stream and sends touch gestures bac
 > research, personal use, and controlled environments, but OS updates may break compatibility and
 > Apple notarization is not guaranteed for distributions that use private APIs.
 
-## V1.1.0 highlights
+## V1.2.0 highlights
 
-- Interactive desktop sessions now prefer hardware H.264 while retaining HEVC fallback. On the
-  tested 2720×1260 / 60 FPS device path, VideoToolbox P95 was about 8.6–8.7 ms.
-- Low-latency VideoToolbox sessions no longer insert periodic IDRs. IDRs are generated for the
-  first frame, reconnects, recovery, or receiver requests, with 25% bounded burst headroom.
-- The new **Adaptive high refresh (experimental)** switch is off by default. A session starts at a
-  stable 60 FPS and attempts 90/120 FPS only after sustained encoder, network, receiver, and
-  thermal headroom.
-- Network adaptation now evaluates receiver rendering against the sender's actual frame rate, so
-  ScreenCaptureKit idle periods are no longer mistaken for congestion.
+- The HarmonyOS parser now shares bounded frame backing instead of copying each payload into a
+  `VideoFrame`; only one unavoidable bounded copy remains before AVCodec input.
+- Decoder-output P95, XComponent display-callback FPS, and display-interval P95 now feed the host's
+  refresh-rate decisions. Surface teardown and generation changes unregister stale callbacks.
+- Release sessions preserve the receiver's negotiated native resolution. Dynamic resolution is
+  available only when explicitly enabled, while network and media pressure use separate hysteresis
+  to prevent an incorrect bitrate reduction from locking high-motion content near 30 FPS.
+- High-motion desktops use a more realistic ScreenCaptureKit delivery deadline and 2× bounded
+  bitrate burst headroom. Drop metrics now distinguish staleness, queue replacement, encoder
+  rejection, recovery gating, and failures for long-run diagnosis.
 
 ## What it can do
 

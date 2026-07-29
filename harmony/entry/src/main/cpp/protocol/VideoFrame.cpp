@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <limits>
 
 namespace second_display::protocol {
@@ -41,6 +42,79 @@ VideoDecodeResult DecodeFailure(std::string detail)
 }
 
 } // namespace
+
+VideoPayload::VideoPayload(std::initializer_list<std::uint8_t> bytes)
+{
+    AssignOwned(Storage(bytes));
+}
+
+VideoPayload::VideoPayload(const Storage& bytes)
+{
+    AssignOwned(bytes);
+}
+
+VideoPayload::VideoPayload(Storage&& bytes)
+{
+    AssignOwned(std::move(bytes));
+}
+
+VideoPayload& VideoPayload::operator=(const Storage& bytes)
+{
+    AssignOwned(bytes);
+    return *this;
+}
+
+VideoPayload& VideoPayload::operator=(Storage&& bytes)
+{
+    AssignOwned(std::move(bytes));
+    return *this;
+}
+
+std::optional<VideoPayload> VideoPayload::SharedSlice(
+    std::shared_ptr<const Storage> storage, std::size_t offset, std::size_t size)
+{
+    if (!storage || offset > storage->size() || size > storage->size() - offset) {
+        return std::nullopt;
+    }
+    return VideoPayload(std::move(storage), offset, size);
+}
+
+const std::uint8_t* VideoPayload::data() const
+{
+    static constexpr std::uint8_t kEmptyPayload = 0;
+    if (size_ == 0 || !storage_) return &kEmptyPayload;
+    return storage_->data() + offset_;
+}
+
+bool VideoPayload::CopyTo(std::uint8_t* destination, std::size_t capacity) const
+{
+    if (size_ > capacity || (size_ > 0 && destination == nullptr)) return false;
+    if (size_ > 0) std::memcpy(destination, data(), size_);
+    return true;
+}
+
+bool VideoPayload::SharesStorageWith(const VideoPayload& other) const
+{
+    return size_ > 0 && other.size_ > 0 && storage_ == other.storage_;
+}
+
+bool VideoPayload::operator==(const VideoPayload& other) const
+{
+    return size_ == other.size_ && std::equal(begin(), end(), other.begin());
+}
+
+VideoPayload::VideoPayload(
+    std::shared_ptr<const Storage> storage, std::size_t offset, std::size_t size)
+    : storage_(std::move(storage)), offset_(offset), size_(size)
+{
+}
+
+void VideoPayload::AssignOwned(Storage bytes)
+{
+    offset_ = 0;
+    size_ = bytes.size();
+    storage_ = std::make_shared<const Storage>(std::move(bytes));
+}
 
 bool VideoFrame::operator==(const VideoFrame& other) const
 {
@@ -87,9 +161,9 @@ VideoDecodeResult DecodeVideoFrame(const std::vector<std::uint8_t>& bytes)
     frame.sequence = ReadNetwork<std::uint32_t>(bytes, 8);
     frame.ptsUs = ReadNetwork<std::uint64_t>(bytes, 12);
     frame.captureUs = ReadNetwork<std::uint64_t>(bytes, 20);
-    frame.payload.assign(bytes.begin() + kVideoFrameHeaderSize, bytes.end());
+    frame.payload = VideoPayload::Storage(
+        bytes.begin() + kVideoFrameHeaderSize, bytes.end());
     return {std::move(frame), "", ""};
 }
 
 } // namespace second_display::protocol
-

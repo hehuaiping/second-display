@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DecoderFrameQueue.hpp"
+#include "LatencyWindow.hpp"
 
 #include <cstdint>
 #include <deque>
@@ -32,9 +33,12 @@ public:
         std::uint64_t lastInputQueueLatencyUs = 0;
         std::uint64_t lastDecodeLatencyUs = 0;
         std::uint64_t lastOutputLatencyUs = 0;
+        std::uint64_t decodeOutputP95Us = 0;
         std::size_t inFlightFrames = 0;
         bool lowLatencyEnabled = false;
         bool immediateRenderingEnabled = true;
+        bool timedRenderingEnabled = false;
+        bool boundedBufferCountsEnabled = false;
     };
 
     using KeyFrameRequest = std::function<void(bool resetDecoder)>;
@@ -114,12 +118,17 @@ private:
     std::uint64_t lastInputQueueLatencyUs_ = 0;
     std::uint64_t lastDecodeLatencyUs_ = 0;
     std::uint64_t lastOutputLatencyUs_ = 0;
+    LatencyWindow<256> decodeOutputLatenciesUs_;
+    std::uint64_t maximumOutputAgeUs_ = 25000;
     bool lowLatencyEnabled_ = false;
+    bool timedRenderingEnabled_ = false;
+    bool boundedBufferCountsEnabled_ = false;
     KeyFrameRequest requestKeyFrame_;
     FatalErrorHandler fatalError_;
 
+    // 低于五帧会让 Mate 60 Pro 的硬件解码流水线退化到约 30 FPS；入口队列仍保持
+    // 两帧 latest-wins，过期输出只在后方至少积压两帧时释放。
     static constexpr std::size_t kMaximumInFlightFrames = 5;
-    static constexpr std::uint64_t kMaximumOutputAgeUs = 120000;
 };
 
 } // namespace second_display::decoder

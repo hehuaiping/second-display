@@ -47,7 +47,7 @@ final class MediaPipelineTests: XCTestCase {
             lowLatencyRateControlEnabled: true)
         XCTAssertNil(lowLatencyPlan.maximumKeyFrameIntervalFrames)
         XCTAssertNil(lowLatencyPlan.maximumKeyFrameIntervalDurationSeconds)
-        XCTAssertEqual(lowLatencyPlan.dataRateLimitBytesPerSecond, 1_250_000)
+        XCTAssertEqual(lowLatencyPlan.dataRateLimitBytesPerSecond, 2_000_000)
 
         let fallbackPlan = VideoEncoderRateControlPlan(
             spec: spec,
@@ -210,8 +210,12 @@ final class MediaPipelineTests: XCTestCase {
     func testMediaMetricsCalculatePercentilesAndSeparateDropTypes() async {
         let metrics = MediaPipelineMetrics()
         await metrics.recordCaptureDrop(count: 2)
-        await metrics.recordEncodeDrop(count: 3)
+        await metrics.recordEncodeDrop()
+        await metrics.recordEncodeDrop(reason: .staleBeforeEncode)
+        await metrics.recordEncodeDrop(reason: .encoderRejected)
         await metrics.recordSendDrop(count: 4)
+        await metrics.recordCaptureObserved()
+        await metrics.recordCaptureObserved()
         await metrics.recordCapturedFrame(deliveryLatencyUs: 3_000)
         await metrics.recordCapturedFrame(deliveryLatencyUs: 9_000)
         await metrics.recordEncodeStarted(queueLatencyUs: 4_000)
@@ -234,7 +238,15 @@ final class MediaPipelineTests: XCTestCase {
         let snapshot = await metrics.snapshot()
         XCTAssertEqual(snapshot.captureDropCount, 2)
         XCTAssertEqual(snapshot.encodeDropCount, 3)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.staleBeforeEncode, 1)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.queueReplacement, 0)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.encoderRejected, 1)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.recoveryDiscard, 0)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.failure, 0)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.unspecified, 1)
+        XCTAssertEqual(snapshot.encodeDropBreakdown.total, snapshot.encodeDropCount)
         XCTAssertEqual(snapshot.sendDropCount, 4)
+        XCTAssertEqual(snapshot.capturedFrameCount, 2)
         XCTAssertEqual(snapshot.captureDeliveryP50Milliseconds, 9)
         XCTAssertEqual(snapshot.captureDeliveryP95Milliseconds, 9)
         XCTAssertEqual(snapshot.encodeQueueP50Milliseconds, 12)
@@ -258,7 +270,7 @@ final class MediaPipelineTests: XCTestCase {
             await metrics.recordEncodedFrame(latencyUs: UInt64(value))
         }
         let snapshot = await metrics.snapshot()
-        XCTAssertEqual(snapshot.encodedFrameCount, 4)
+        XCTAssertEqual(snapshot.encodedFrameCount, 6)
         XCTAssertEqual(snapshot.encodeP50Milliseconds, 8)
         XCTAssertEqual(snapshot.encodeP95Milliseconds, 9)
     }
@@ -453,6 +465,7 @@ final class MediaPipelineTests: XCTestCase {
         let snapshot = await metrics.snapshot()
         let frames = await output.frames
         XCTAssertGreaterThan(snapshot.encodeDropCount, 0)
+        XCTAssertGreaterThan(snapshot.encodeDropBreakdown.queueReplacement, 0)
         XCTAssertFalse(frames.isEmpty)
         XCTAssertTrue(frames.first?.isKeyFrame == true)
         let maximumConcurrentEncodes = await encoder.maximumConcurrentEncodes
@@ -545,6 +558,7 @@ final class MediaPipelineTests: XCTestCase {
         let frames = await output.frames
         let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
+        XCTAssertGreaterThanOrEqual(snapshot.encodeDropBreakdown.staleBeforeEncode, 1)
         XCTAssertEqual(frames.count, 1)
         XCTAssertTrue(frame.isKeyFrame)
     }
@@ -600,8 +614,57 @@ final class MediaPipelineTests: XCTestCase {
         let frames = await output.frames
         let frame = try XCTUnwrap(frames.first)
         XCTAssertGreaterThanOrEqual(snapshot.encodeDropCount, 1)
+        XCTAssertGreaterThanOrEqual(snapshot.encodeDropBreakdown.staleBeforeEncode, 1)
         XCTAssertEqual(frames.count, 1)
         XCTAssertTrue(frame.isKeyFrame)
+    }
+
+    func testCaptureTimestampAgeGateAcceptsBoundedSystemDeliveryLatency() async throws {
+        let nowUs: UInt64 = 1_000_000
+        let encoder = FakeVideoEncoder(delayNanoseconds: 0, payloadBytes: 128)
+        let metrics = MediaPipelineMetrics()
+        let pipeline = CaptureEncoderPipeline(
+            videoEncoder: encoder,
+            metrics: metrics,
+            monotonicMicroseconds: { nowUs }
+        )
+        let output = EncodedFrameRecorder()
+        let pair = AsyncThrowingStream<CapturedFrame, Error>.makeStream(
+            bufferingPolicy: .unbounded)
+        try await pipeline.start(
+            frames: pair.stream,
+            encoderConfiguration: EncoderSpec(
+                width: 64, height: 64, framesPerSecond: 60, bitrate: 8_000_000),
+            generation: 19,
+            isCurrentGeneration: { $0 == 19 },
+            onEncodedFrame: { frame in await output.append(frame) }
+        )
+
+        let source = try makeFrame(
+            width: 64,
+            height: 64,
+            sequence: 0,
+            generation: 19,
+            callbackTimestampUs: nowUs
+        )
+        pair.continuation.yield(
+            CapturedFrame(
+                pixelBuffer: source.pixelBuffer,
+                presentationTimeStamp: source.presentationTimeStamp,
+                captureTimestampUs: nowUs - 40_000,
+                callbackTimestampUs: nowUs,
+                contentRect: source.contentRect,
+                generation: source.generation
+            ))
+        pair.continuation.finish()
+        try await waitForFrameCount(1, recorder: output)
+        await pipeline.stop()
+
+        let snapshot = await metrics.snapshot()
+        let frames = await output.frames
+        XCTAssertEqual(snapshot.encodeDropCount, 0)
+        XCTAssertEqual(frames.count, 1)
+        XCTAssertTrue(try XCTUnwrap(frames.first).isKeyFrame)
     }
 
     func testExplicitDecoderRecoveryRequestForcesNextIDR() async throws {

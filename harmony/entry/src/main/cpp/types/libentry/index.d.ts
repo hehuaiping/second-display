@@ -11,11 +11,19 @@ export interface DecoderStatus {
   inputQueueLatencyUs: number;
   decodeLatencyUs: number;
   outputLatencyUs: number;
+  decodeOutputP95Us: number;
   decoderInFlight: number;
+  displayFrames: number;
+  displayFramesPerSecond: number;
+  displayIntervalP95Us: number;
   keyFrameRequests: number;
   decoderRecoveries: number;
   lowLatencyEnabled: boolean;
   immediateRenderingEnabled: boolean;
+  timedRenderingEnabled: boolean;
+  boundedBufferCountsEnabled: boolean;
+  displayFrameSamplingEnabled: boolean;
+  expectedFrameRateApplied: boolean;
 }
 
 interface ReceiverNative {

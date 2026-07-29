@@ -77,6 +77,7 @@ public struct P3HostConfiguration: Sendable {
     public let showsAnimatedTestPattern: Bool
     public let maximumFramesPerSecond: Int
     public let allowsAdaptiveHighRefreshRate: Bool
+    public let allowsAdaptiveResolution: Bool
     public let certificateFingerprint: String?
     public let bonjourServiceName: String
 
@@ -89,6 +90,7 @@ public struct P3HostConfiguration: Sendable {
         showsAnimatedTestPattern: Bool = false,
         maximumFramesPerSecond: Int = 60,
         allowsAdaptiveHighRefreshRate: Bool = false,
+        allowsAdaptiveResolution: Bool = false,
         certificateFingerprint: String? = nil,
         bonjourServiceName: String = Host.current().localizedName ?? "Second Display Mac"
     ) {
@@ -101,6 +103,9 @@ public struct P3HostConfiguration: Sendable {
         self.maximumFramesPerSecond = [120, 90, 60].first { $0 <= maximumFramesPerSecond } ?? 60
         self.allowsAdaptiveHighRefreshRate =
             allowsAdaptiveHighRefreshRate && self.maximumFramesPerSecond > 60
+        // 发行路径优先保持原生像素映射，避免非整数缩放模糊和分辨率重建。
+        // 该开关仅保留给压力测试、弱网和高刷新率实验。
+        self.allowsAdaptiveResolution = allowsAdaptiveResolution
         self.certificateFingerprint = certificateFingerprint
         let trimmedName = bonjourServiceName.trimmingCharacters(in: .whitespacesAndNewlines)
         self.bonjourServiceName = trimmedName.isEmpty ? "Second Display Mac" : trimmedName

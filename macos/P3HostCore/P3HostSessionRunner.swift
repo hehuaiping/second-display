@@ -140,7 +140,13 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                 hello.orientation == .portrait ? .portrait : .landscape
             let supportedCodecs = Self.preferredLowLatencyCodecs(
                 supportsHardwareHEVC: VideoEncoderCapability.supportsHardwareHEVC)
-            let resolutionScale = currentResolutionScale(for: hello.deviceId)
+            let resolutionScale =
+                configuration.allowsAdaptiveResolution
+                ? currentResolutionScale(for: hello.deviceId) : 1
+            if !configuration.allowsAdaptiveResolution {
+                // 清除同一进程内实验模式留下的档位，发行路径始终重新协商原生分辨率。
+                setResolutionScale(1, for: hello.deviceId)
+            }
             let preferredDimensions = Self.scaledDimensions(
                 width: hello.nativeWidth,
                 height: hello.nativeHeight,
@@ -422,6 +428,7 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                 heartbeat: heartbeat,
                 videoChannel: createdVideoChannel,
                 frameCounter: frameCounter,
+                displayLease: displayLease,
                 displayID: handle.displayID,
                 deviceName: hello.deviceName,
                 sessionID: ready.sessionId,
@@ -566,6 +573,7 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
         heartbeat: HeartbeatMonitor,
         videoChannel: VideoChannel,
         frameCounter: P3FrameCounter,
+        displayLease: P3DisplayLease,
         displayID: UInt32,
         deviceName: String,
         sessionID: String,
@@ -583,7 +591,9 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
         var tick: UInt64 = 0
         var adaptation = NetworkAdaptiveController(
             baseBitrate: stream.bitrate,
-            initialResolutionScale: initialResolutionScale
+            initialResolutionScale: initialResolutionScale,
+            allowsResolutionScaling: configuration.allowsAdaptiveResolution,
+            warmupSamplesRequired: 8
         )
         var frameRateAdaptation =
             configuration.allowsAdaptiveHighRefreshRate
@@ -599,8 +609,15 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
             )
             : nil
         var lastReceiverDroppedFrames: UInt64 = 0
-        var lastHostDroppedFrames: UInt64 = 0
+        let initialMetrics = await pipeline.metricsSnapshot()
+        var lastHostDroppedFrames =
+            initialMetrics.captureDropCount
+            + initialMetrics.encodeDropCount
+            + initialMetrics.sendDropCount
         var lastObservedEncodedFrameCount: UInt64 = 0
+        var lastObservedCapturedFrameCount = initialMetrics.capturedFrameCount
+        var lastObservedGeneratedFrameCount =
+            await displayLease.testPatternFrameCount()
         var lastAdaptationSampleTimestampNanoseconds = DispatchTime.now().uptimeNanoseconds
         while true {
             if let durationSeconds = configuration.durationSeconds,
@@ -627,12 +644,30 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                 let senderFramesPerSecond =
                     Double(encodedFramesDelta) * 1_000_000_000
                     / Double(adaptationSampleDurationNanoseconds)
+                let capturedFramesDelta =
+                    metrics.capturedFrameCount >= lastObservedCapturedFrameCount
+                    ? metrics.capturedFrameCount - lastObservedCapturedFrameCount : 0
+                let capturedFramesPerSecond =
+                    Double(capturedFramesDelta) * 1_000_000_000
+                    / Double(adaptationSampleDurationNanoseconds)
+                let generatedFrameCount =
+                    await displayLease.testPatternFrameCount()
+                let generatedFramesDelta =
+                    generatedFrameCount >= lastObservedGeneratedFrameCount
+                    ? generatedFrameCount - lastObservedGeneratedFrameCount : 0
+                let generatedFramesPerSecond =
+                    Double(generatedFramesDelta) * 1_000_000_000
+                    / Double(adaptationSampleDurationNanoseconds)
                 lastObservedEncodedFrameCount = encodedFrameCount
+                lastObservedCapturedFrameCount = metrics.capturedFrameCount
+                lastObservedGeneratedFrameCount = generatedFrameCount
                 lastAdaptationSampleTimestampNanoseconds =
                     adaptationSampleTimestampNanoseconds
                 let networkRTTMilliseconds = await heartbeat.currentRTTMilliseconds
                 let videoQueue = await videoChannel.queueSnapshot()
                 let feedback = await receiverFeedback.latest
+                let receiverPresentationFramesPerSecond =
+                    Self.effectiveReceiverPresentationFramesPerSecond(feedback)
                 let networkInterface = await networkPathState.kind.rawValue
                 let receiverDroppedDelta: UInt64
                 if let feedback {
@@ -656,10 +691,11 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                     senderQueueDepth: videoQueue.depth,
                     receiverQueueDepth: feedback?.decoderQueueDepth ?? 0,
                     droppedFramesDelta: receiverDroppedDelta,
-                    renderedFramesPerSecond: feedback.flatMap {
-                        $0.renderedFramesPerSecond > 0 ? $0.renderedFramesPerSecond : nil
-                    },
+                    renderedFramesPerSecond: receiverPresentationFramesPerSecond,
                     senderFramesPerSecond: senderFramesPerSecond,
+                    hostDroppedFramesDelta: hostDroppedDelta,
+                    encodeP95Milliseconds: metrics.encodeP95Milliseconds,
+                    contentIsActive: metrics.contentActivity == .active,
                     targetFramesPerSecond: stream.fps
                 )
                 if let decision = adaptation.observe(adaptationSample) {
@@ -688,10 +724,16 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                         senderQueueDepth: videoQueue.depth,
                         receiverQueueDepth: feedback?.decoderQueueDepth ?? 0,
                         droppedFramesDelta: hostDroppedDelta &+ receiverDroppedDelta,
-                        renderedFramesPerSecond: feedback.flatMap {
-                            $0.renderedFramesPerSecond > 0
-                                ? $0.renderedFramesPerSecond : nil
-                        },
+                        renderedFramesPerSecond: receiverPresentationFramesPerSecond,
+                        displayFramesPerSecond: feedback?.displayFramesPerSecond,
+                        displayIntervalP95Milliseconds:
+                            feedback?.displayIntervalP95Us.map {
+                                Double($0) / 1_000
+                            },
+                        decoderOutputP95Milliseconds:
+                            feedback?.decodeOutputP95Us.map {
+                                Double($0) / 1_000
+                            },
                         hardwareAccelerated: metrics.encoderHardwareAccelerated == true,
                         lowLatencyRateControlEnabled:
                             metrics.lowLatencyRateControlEnabled == true,
@@ -721,7 +763,10 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                 let metricsFormat =
                     "Streaming %d×%d %@ at %d fps · drops C/E/S %llu/%llu/%llu · "
                     + "p95 cap %.1f q %.1f VT %.1f pack %.1f enc %.1f send %.1f ms · "
-                    + "dirty %.1f%% %@ %.1f Mbps · %@ LL %@ · net %@"
+                    + "src %.1f/cap %.1f/enc %.1f · recv %.1f/display %.1f fps "
+                    + "decodeP95 %.1f ms · "
+                    + "dirty %.1f%% %@ %.1f Mbps · %@ LL %@ · net %@ · "
+                    + "E age/q/vt/rec/fail/u %llu/%llu/%llu/%llu/%llu/%llu"
                 await onUpdate(
                     P3HostUpdate(
                         phase: .streaming,
@@ -740,12 +785,24 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                             metrics.bitstreamConversionP95Milliseconds,
                             metrics.encodeP95Milliseconds,
                             metrics.sendQueueP95Milliseconds,
+                            generatedFramesPerSecond,
+                            capturedFramesPerSecond,
+                            senderFramesPerSecond,
+                            receiverPresentationFramesPerSecond ?? 0,
+                            feedback?.displayFramesPerSecond ?? 0,
+                            Double(feedback?.decodeOutputP95Us ?? 0) / 1_000,
                             metrics.dirtyAreaP95Percent,
                             activity,
                             Double(metrics.currentBitrate) / 1_000_000,
                             encoderPath,
                             lowLatencyMode,
-                            networkInterface
+                            networkInterface,
+                            metrics.encodeDropBreakdown.staleBeforeEncode,
+                            metrics.encodeDropBreakdown.queueReplacement,
+                            metrics.encodeDropBreakdown.encoderRejected,
+                            metrics.encodeDropBreakdown.recoveryDiscard,
+                            metrics.encodeDropBreakdown.failure,
+                            metrics.encodeDropBreakdown.unspecified
                         ),
                         displayID: displayID,
                         deviceName: deviceName,
@@ -821,6 +878,27 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
         // 当前 Apple Silicon 实测 H.264 的 P95/P99 编码延迟低于 HEVC。
         // HEVC 仍保留为回退能力，但桌面交互链路优先选择更低尾延迟的 H.264。
         supportsHardwareHEVC ? [.h264, .hevc] : [.h264]
+    }
+
+    static func effectiveReceiverPresentationFramesPerSecond(
+        _ feedback: ReceiverFeedback?
+    ) -> Double? {
+        guard let feedback else { return nil }
+        let decoderSubmissionRate =
+            feedback.renderedFramesPerSecond > 0
+            ? feedback.renderedFramesPerSecond : nil
+        let displayRate =
+            feedback.displayFramesPerSecond.flatMap { $0 > 0 ? $0 : nil }
+        switch (decoderSubmissionRate, displayRate) {
+        case (.some(let decoder), .some(let display)):
+            return min(decoder, display)
+        case (.some(let decoder), .none):
+            return decoder
+        case (.none, .some(let display)):
+            return display
+        case (.none, .none):
+            return nil
+        }
     }
 
     private func currentResolutionScale(for deviceID: String) -> Double {
@@ -1099,6 +1177,10 @@ private final class P3DisplayLease {
         )
         pattern.start()
         testPattern = pattern
+    }
+
+    func testPatternFrameCount() -> UInt64 {
+        testPattern?.generatedFrameCount ?? 0
     }
 
     func destroy() async {

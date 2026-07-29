@@ -7,6 +7,9 @@ public struct NetworkAdaptationSample: Equatable, Sendable {
     public let droppedFramesDelta: UInt64
     public let renderedFramesPerSecond: Double?
     public let senderFramesPerSecond: Double?
+    public let hostDroppedFramesDelta: UInt64
+    public let encodeP95Milliseconds: Double?
+    public let contentIsActive: Bool
     public let targetFramesPerSecond: Int
 
     public init(
@@ -16,6 +19,9 @@ public struct NetworkAdaptationSample: Equatable, Sendable {
         droppedFramesDelta: UInt64,
         renderedFramesPerSecond: Double?,
         senderFramesPerSecond: Double? = nil,
+        hostDroppedFramesDelta: UInt64 = 0,
+        encodeP95Milliseconds: Double? = nil,
+        contentIsActive: Bool = true,
         targetFramesPerSecond: Int
     ) {
         self.roundTripMilliseconds = roundTripMilliseconds
@@ -24,6 +30,9 @@ public struct NetworkAdaptationSample: Equatable, Sendable {
         self.droppedFramesDelta = droppedFramesDelta
         self.renderedFramesPerSecond = renderedFramesPerSecond
         self.senderFramesPerSecond = senderFramesPerSecond.map { max(0, $0) }
+        self.hostDroppedFramesDelta = hostDroppedFramesDelta
+        self.encodeP95Milliseconds = encodeP95Milliseconds.map { max(0, $0) }
+        self.contentIsActive = contentIsActive
         self.targetFramesPerSecond = max(1, targetFramesPerSecond)
     }
 }
@@ -37,28 +46,64 @@ public struct NetworkAdaptationDecision: Equatable, Sendable {
 
 public struct NetworkAdaptiveController: Sendable {
     private let baseBitrate: Int
+    private let allowsResolutionScaling: Bool
+    private let warmupSamplesRequired: Int
     private var bitrateLevel = 0
     private var resolutionLevel = 0
     private var congestionSamples = 0
     private var severeCongestionSamples = 0
+    private var mediaPressureSamples = 0
     private var healthySamples = 0
+    private var resolutionHealthySamples = 0
+    private var observedSamples = 0
 
-    public init(baseBitrate: Int, initialResolutionScale: Double = 1) {
+    public init(
+        baseBitrate: Int,
+        initialResolutionScale: Double = 1,
+        allowsResolutionScaling: Bool = true,
+        warmupSamplesRequired: Int = 0
+    ) {
         self.baseBitrate = min(max(baseBitrate, 8_000_000), 30_000_000)
+        self.allowsResolutionScaling = allowsResolutionScaling
+        self.warmupSamplesRequired = max(0, warmupSamplesRequired)
         self.resolutionLevel =
-            Self.resolutionScales.enumerated().min {
+            allowsResolutionScaling
+            ? Self.resolutionScales.enumerated().min {
                 abs($0.element - initialResolutionScale)
                     < abs($1.element - initialResolutionScale)
             }?.offset ?? 0
+            : 0
     }
 
     public mutating func observe(
         _ sample: NetworkAdaptationSample
     ) -> NetworkAdaptationDecision? {
+        observedSamples += 1
+        if observedSamples <= warmupSamplesRequired {
+            congestionSamples = 0
+            severeCongestionSamples = 0
+            mediaPressureSamples = 0
+            healthySamples = 0
+            resolutionHealthySamples = 0
+            return nil
+        }
+
         let rtt = sample.roundTripMilliseconds ?? 0
         let targetFramesPerSecond = Double(sample.targetFramesPerSecond)
         let senderFramesPerSecond =
             sample.senderFramesPerSecond ?? targetFramesPerSecond
+        let senderRatio = senderFramesPerSecond / targetFramesPerSecond
+        let frameBudgetMilliseconds = 1_000 / targetFramesPerSecond
+        let hostMediaPressure =
+            sample.contentIsActive
+            && (
+                sample.hostDroppedFramesDelta
+                    >= UInt64(max(2, Int(targetFramesPerSecond * 0.03)))
+                || (sample.hostDroppedFramesDelta > 0 && senderRatio < 0.90)
+                || (sample.encodeP95Milliseconds.map {
+                    $0 > frameBudgetMilliseconds * 0.95
+                } ?? false)
+            )
         let renderedRatio: Double
         if senderFramesPerSecond >= targetFramesPerSecond * 0.5,
             let renderedFramesPerSecond = sample.renderedFramesPerSecond
@@ -72,31 +117,79 @@ public struct NetworkAdaptiveController: Sendable {
         } else {
             renderedRatio = 1
         }
-        let severe =
-            rtt >= 120 || sample.senderQueueDepth >= 2 || sample.receiverQueueDepth >= 4
-            || sample.droppedFramesDelta >= 4 || renderedRatio < 0.72
-        let congested =
-            severe || rtt >= 70 || sample.senderQueueDepth >= 1
-            || sample.receiverQueueDepth >= 2 || sample.droppedFramesDelta > 0
-            || renderedRatio < 0.88
+        // 接收端会主动释放已经过期、后方有更新画面的 Surface 输出。只要有效呈现
+        // 仍跟得上目标且两端队列为空，这类 latest-wins 丢弃不是网络拥塞，不能降画质。
+        let receiverDropPressure =
+            sample.droppedFramesDelta > 0
+            && (
+                renderedRatio < 0.97
+                || sample.senderQueueDepth > 0
+                || sample.receiverQueueDepth > 1
+            )
+        let receiverMediaPressure =
+            sample.contentIsActive
+            && (
+                sample.receiverQueueDepth >= 2
+                || receiverDropPressure
+                || renderedRatio < 0.88
+            )
+        let networkSevere =
+            rtt >= 120 || sample.senderQueueDepth >= 2
+        let networkCongested =
+            networkSevere || rtt >= 70 || sample.senderQueueDepth >= 1
+        let mediaPressure = hostMediaPressure || receiverMediaPressure
 
-        // 使用连续样本而不是单点阈值，防止 Wi‑Fi 瞬时抖动导致码率和分辨率来回振荡。
-        if congested {
+        // 网络拥塞与主机媒体压力必须分开处理。降低码率可以缓解网络队列，但在
+        // 编解码器已经承压时继续降码率会形成 60 → 30 FPS 的正反馈锁死。接收端
+        // latest-wins 和解码波动也不是网络拥塞，不能用降低发送码率来掩盖。
+        if networkCongested {
             congestionSamples += 1
-            severeCongestionSamples = severe ? severeCongestionSamples + 1 : 0
+            severeCongestionSamples = networkSevere ? severeCongestionSamples + 1 : 0
+            mediaPressureSamples = 0
             healthySamples = 0
+            resolutionHealthySamples = 0
         } else {
             healthySamples += 1
+            mediaPressureSamples = mediaPressure ? mediaPressureSamples + 1 : 0
+            resolutionHealthySamples =
+                mediaPressure ? 0 : resolutionHealthySamples + 1
             congestionSamples = 0
             severeCongestionSamples = 0
+        }
+
+        if !networkCongested, mediaPressure {
+            if bitrateLevel > 0 {
+                // 网络已经健康时，主机掉帧优先恢复协商基础码率，避免低码率限制让
+                // 高复杂度全屏动画长期停留在约一半帧率。
+                bitrateLevel = 0
+                return decision(
+                    rebuild: false,
+                    reason: hostMediaPressure
+                        ? "host media bitrate recovery" : "receiver media bitrate recovery")
+            }
+            if mediaPressureSamples >= 5,
+                allowsResolutionScaling,
+                resolutionLevel < Self.resolutionScales.count - 1
+            {
+                mediaPressureSamples = 0
+                resolutionLevel += 1
+                return decision(
+                    rebuild: true,
+                    reason: hostMediaPressure
+                        ? "sustained host media pressure"
+                        : "sustained receiver media pressure")
+            }
         }
 
         if congestionSamples >= 2, bitrateLevel < Self.bitrateScales.count - 1 {
             congestionSamples = 0
             bitrateLevel += 1
-            return decision(rebuild: false, reason: severe ? "severe congestion" : "congestion")
+            return decision(
+                rebuild: false,
+                reason: networkSevere ? "severe congestion" : "congestion")
         }
         if severeCongestionSamples >= 5,
+            allowsResolutionScaling,
             bitrateLevel == Self.bitrateScales.count - 1,
             resolutionLevel < Self.resolutionScales.count - 1
         {
@@ -104,20 +197,24 @@ public struct NetworkAdaptiveController: Sendable {
             severeCongestionSamples = 0
             resolutionLevel += 1
             bitrateLevel = max(1, bitrateLevel - 1)
-            return decision(rebuild: true, reason: "sustained congestion")
+            return decision(
+                rebuild: true,
+                reason: "sustained congestion")
         }
-        if healthySamples >= 8 {
-            // 恢复路径比降级路径更保守，确认链路稳定后才逐级恢复画质。
+        if healthySamples >= 8, bitrateLevel > 0 {
             healthySamples = 0
-            if resolutionLevel > 0 {
-                resolutionLevel -= 1
-                bitrateLevel = min(bitrateLevel + 1, Self.bitrateScales.count - 1)
-                return decision(rebuild: true, reason: "network recovered")
-            }
-            if bitrateLevel > 0 {
-                bitrateLevel -= 1
-                return decision(rebuild: false, reason: "network recovered")
-            }
+            bitrateLevel -= 1
+            return decision(rebuild: false, reason: "network recovered")
+        }
+        if allowsResolutionScaling,
+            resolutionHealthySamples >= 20,
+            resolutionLevel > 0,
+            bitrateLevel == 0
+        {
+            // 分辨率恢复至少等待 20 个健康采样，防止高动态场景在两个档位间反复重建。
+            resolutionHealthySamples = 0
+            resolutionLevel -= 1
+            return decision(rebuild: true, reason: "sustained media recovery")
         }
         return nil
     }
@@ -149,6 +246,9 @@ public struct FrameRateAdaptationSample: Equatable, Sendable {
     public let receiverQueueDepth: Int
     public let droppedFramesDelta: UInt64
     public let renderedFramesPerSecond: Double?
+    public let displayFramesPerSecond: Double?
+    public let displayIntervalP95Milliseconds: Double?
+    public let decoderOutputP95Milliseconds: Double?
     public let hardwareAccelerated: Bool
     public let lowLatencyRateControlEnabled: Bool
     public let thermalConstrained: Bool
@@ -164,6 +264,9 @@ public struct FrameRateAdaptationSample: Equatable, Sendable {
         receiverQueueDepth: Int,
         droppedFramesDelta: UInt64,
         renderedFramesPerSecond: Double?,
+        displayFramesPerSecond: Double? = nil,
+        displayIntervalP95Milliseconds: Double? = nil,
+        decoderOutputP95Milliseconds: Double? = nil,
         hardwareAccelerated: Bool,
         lowLatencyRateControlEnabled: Bool,
         thermalConstrained: Bool,
@@ -178,6 +281,11 @@ public struct FrameRateAdaptationSample: Equatable, Sendable {
         self.receiverQueueDepth = max(0, receiverQueueDepth)
         self.droppedFramesDelta = droppedFramesDelta
         self.renderedFramesPerSecond = renderedFramesPerSecond
+        self.displayFramesPerSecond = displayFramesPerSecond.map { max(0, $0) }
+        self.displayIntervalP95Milliseconds =
+            displayIntervalP95Milliseconds.map { max(0, $0) }
+        self.decoderOutputP95Milliseconds =
+            decoderOutputP95Milliseconds.map { max(0, $0) }
         self.hardwareAccelerated = hardwareAccelerated
         self.lowLatencyRateControlEnabled = lowLatencyRateControlEnabled
         self.thermalConstrained = thermalConstrained
@@ -226,6 +334,8 @@ public struct FrameRateAdaptiveController: Sendable {
         let currentRate = supportedRates[currentRateIndex]
         let renderedRatio =
             sample.renderedFramesPerSecond.map { $0 / Double(currentRate) }
+        let displayRatio =
+            sample.displayFramesPerSecond.map { $0 / Double(currentRate) }
         let currentFrameBudget = 1_000 / Double(currentRate)
         let unhealthy =
             sample.thermalConstrained
@@ -233,7 +343,14 @@ public struct FrameRateAdaptiveController: Sendable {
             || sample.receiverQueueDepth > 1
             || sample.droppedFramesDelta > 0
             || sample.encodeP95Milliseconds > currentFrameBudget * 0.95
+            || (sample.contentIsActive && (sample.decoderOutputP95Milliseconds.map {
+                $0 > currentFrameBudget * 0.95
+            } ?? false))
             || (sample.contentIsActive && (renderedRatio ?? 1) < 0.90)
+            || (sample.contentIsActive && (displayRatio ?? 1) < 0.90)
+            || (sample.contentIsActive && (sample.displayIntervalP95Milliseconds.map {
+                $0 > currentFrameBudget * 1.5
+            } ?? false))
             || (sample.roundTripMilliseconds ?? 0) >= 70
 
         if unhealthy {
@@ -270,8 +387,17 @@ public struct FrameRateAdaptiveController: Sendable {
             && (sample.renderedFramesPerSecond.map {
                 $0 / Double(currentRate) >= 0.97
             } ?? false)
-            && sample.videoToolboxP95Milliseconds <= nextFrameBudget * 0.75
-            && sample.encodeP95Milliseconds <= nextFrameBudget * 0.75
+            && (sample.displayFramesPerSecond.map {
+                $0 / Double(currentRate) >= 0.97
+            } ?? false)
+            && (sample.displayIntervalP95Milliseconds.map {
+                $0 <= currentFrameBudget * 1.25
+            } ?? false)
+            && (sample.decoderOutputP95Milliseconds.map {
+                $0 <= nextFrameBudget * 0.45
+            } ?? false)
+            && sample.videoToolboxP95Milliseconds <= nextFrameBudget * 0.55
+            && sample.encodeP95Milliseconds <= nextFrameBudget * 0.55
             && (sample.roundTripMilliseconds ?? 0) < 40
 
         guard upgradeHealthy else {

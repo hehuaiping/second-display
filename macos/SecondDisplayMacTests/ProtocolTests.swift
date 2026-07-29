@@ -70,6 +70,9 @@ final class ProtocolTests: XCTestCase {
             decoderQueueDepth: 2,
             droppedFrames: 3,
             renderedFramesPerSecond: 59.5,
+            displayFramesPerSecond: 60,
+            displayIntervalP95Us: 16_800,
+            decodeOutputP95Us: 9_200,
             networkType: "wifi"
         )
         let decoded = try XCTUnwrap(codec.decode(try codec.encode(feedback)))
@@ -77,6 +80,19 @@ final class ProtocolTests: XCTestCase {
             return XCTFail("Expected receiverFeedback")
         }
         XCTAssertEqual(value, feedback)
+
+        let legacy = Data(
+            #"{"type":"receiverFeedback","protocolVersion":1,"sessionId":"s","sequence":2,"decoderQueueDepth":1,"droppedFrames":0,"renderedFramesPerSecond":59,"networkType":"wifi"}"#
+                .utf8
+        )
+        guard case .receiverFeedback(let legacyValue) =
+            try XCTUnwrap(codec.decode(legacy))
+        else {
+            return XCTFail("Expected legacy receiverFeedback")
+        }
+        XCTAssertNil(legacyValue.displayFramesPerSecond)
+        XCTAssertNil(legacyValue.displayIntervalP95Us)
+        XCTAssertNil(legacyValue.decodeOutputP95Us)
 
         let invalid = Data(
             #"{"type":"receiverFeedback","protocolVersion":1,"sessionId":"s","sequence":1,"decoderQueueDepth":65,"droppedFrames":0,"renderedFramesPerSecond":60,"networkType":"wifi"}"#

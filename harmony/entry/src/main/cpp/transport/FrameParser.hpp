@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -25,7 +26,7 @@ public:
     FrameParserResult Feed(std::string_view sessionId, const std::uint8_t* bytes, std::size_t size);
     FrameParserResult Feed(std::string_view sessionId, const std::vector<std::uint8_t>& bytes);
     FrameParserResult Finish(std::string_view sessionId);
-    std::size_t BufferedBytes() const { return buffer_.size() - readOffset_; }
+    std::size_t BufferedBytes() const { return buffer_->size() - readOffset_; }
 
 private:
     FrameParserResult ParseAvailable();
@@ -34,7 +35,8 @@ private:
     void CompactConsumed(bool force = false);
 
     std::string sessionId_;
-    std::vector<std::uint8_t> buffer_;
+    std::shared_ptr<protocol::VideoPayload::Storage> buffer_ =
+        std::make_shared<protocol::VideoPayload::Storage>();
     std::size_t readOffset_ = 0;
     std::optional<std::uint32_t> lastSequence_;
     bool failed_ = false;
