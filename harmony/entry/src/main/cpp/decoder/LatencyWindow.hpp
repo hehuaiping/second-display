@@ -37,7 +37,17 @@ public:
         if (size_ == 0) return 0;
         const auto normalized = std::clamp(percentile, 0.0, 1.0);
         auto sorted = values_;
-        std::sort(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(size_));
+        // 固定容量窗口使用显式插入排序，避免 GCC 13 在小 std::array 上展开
+        // std::sort 时产生错误的 -Warray-bounds 诊断；排序范围始终受 size_ 限制。
+        for (std::size_t index = 1; index < size_; ++index) {
+            const auto value = sorted[index];
+            auto insertionIndex = index;
+            while (insertionIndex > 0 && sorted[insertionIndex - 1] > value) {
+                sorted[insertionIndex] = sorted[insertionIndex - 1];
+                --insertionIndex;
+            }
+            sorted[insertionIndex] = value;
+        }
         const auto rank = static_cast<std::size_t>(
             std::ceil(normalized * static_cast<double>(size_)));
         return sorted[std::min(size_ - 1, rank > 0 ? rank - 1 : 0)];

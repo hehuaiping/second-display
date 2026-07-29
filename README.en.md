@@ -10,7 +10,7 @@ while the HarmonyOS app hardware-decodes the stream and sends touch gestures bac
 > research, personal use, and controlled environments, but OS updates may break compatibility and
 > Apple notarization is not guaranteed for distributions that use private APIs.
 
-## V1.2.0 highlights
+## V1.2.1 highlights
 
 - The HarmonyOS parser now shares bounded frame backing instead of copying each payload into a
   `VideoFrame`; only one unavoidable bounded copy remains before AVCodec input.

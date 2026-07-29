@@ -9,7 +9,7 @@ macOS 端创建真正的扩展桌面、采集并硬件编码画面；HarmonyOS �
 > 项目使用 macOS 私有的 `CGVirtualDisplay` 能力。它适合研究、个人使用和受控环境，
 > 但系统升级可能导致兼容性变化，Apple 公证也不保证接受包含私有 API 的发行包。
 
-## V1.2.0 版本重点
+## V1.2.1 版本重点
 
 - HarmonyOS 接收端的帧解析改为共享有界 backing，移除解析器到 `VideoFrame` 的整帧
   payload 拷贝；进入 AVCodec 前只保留一次无法绕过的有界拷贝。
