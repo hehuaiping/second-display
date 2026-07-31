@@ -10,14 +10,14 @@ jobs:
   release-metadata:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Test release metadata tooling
         run: python3 -m unittest discover -s tools/release -p "test_*.py"
 
   macos:
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Validate shared vectors
         run: python3 tools/validate_shared_vectors.py
       - name: Build macOS Debug app
@@ -43,7 +43,7 @@ jobs:
   harmony-protocol:
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
       - name: Configure dependency-free Harmony C++ tests
         run: cmake -S harmony/entry/src/main/cpp -B .build/harmony-host -DBUILD_PROTOCOL_TESTS=ON -DCMAKE_BUILD_TYPE=Release
       - name: Build Harmony C++ tests
