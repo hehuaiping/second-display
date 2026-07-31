@@ -4,8 +4,11 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
-DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.0.1-macos-$(uname -m).dmg"}
+DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.2.2-macos-$(uname -m).dmg"}
 EXPECTED_BUNDLE_ID="com.cuihua.cloud.display.macos"
+EXPECTED_APP_VERSION=${EXPECTED_APP_VERSION:-}
+RESOURCE_BUNDLE_NAME="SecondDisplay_VirtualDisplayCore.bundle"
+RESOURCE_MANIFEST_NAME="CompatibilityManifest.json"
 TEMPORARY_DIRECTORY=$(mktemp -d /tmp/second-display-verify.XXXXXX)
 MOUNT_POINT="$TEMPORARY_DIRECTORY/mount"
 mkdir -p "$MOUNT_POINT"
@@ -32,6 +35,24 @@ if [[ ! -d "$APP_PATH" ]]; then
     print -u2 "VD_APPLY_FAILED: DMG does not contain Second Display.app"
     exit 1
 fi
+RESOURCE_MANIFEST="$APP_PATH/Contents/Resources/$RESOURCE_BUNDLE_NAME/$RESOURCE_MANIFEST_NAME"
+if [[ ! -f "$RESOURCE_MANIFEST" ]]; then
+    print -u2 "BUILD_OUTPUT_MISSING: DMG app is missing $RESOURCE_BUNDLE_NAME/$RESOURCE_MANIFEST_NAME"
+    exit 1
+fi
+python3 - "$RESOURCE_MANIFEST" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+manifest_path = Path(sys.argv[1])
+try:
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+except (OSError, UnicodeError, json.JSONDecodeError) as error:
+    raise SystemExit(f"VD_APPLY_FAILED: invalid compatibility manifest: {error}") from error
+if manifest.get("schemaVersion") != 1 or not isinstance(manifest.get("entries"), list):
+    raise SystemExit("VD_APPLY_FAILED: unsupported compatibility manifest schema")
+PY
 
 codesign --verify --deep --strict --verbose=2 "$APP_PATH"
 SIGNATURE_INFORMATION=$(codesign -dv --verbose=4 "$APP_PATH" 2>&1)
@@ -46,6 +67,12 @@ fi
 ACTUAL_BUNDLE_ID=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP_PATH/Contents/Info.plist")
 if [[ "$ACTUAL_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]]; then
     print -u2 "VD_APPLY_FAILED: bundle identifier changed to $ACTUAL_BUNDLE_ID"
+    exit 1
+fi
+ACTUAL_APP_VERSION=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' \
+    "$APP_PATH/Contents/Info.plist")
+if [[ -n "$EXPECTED_APP_VERSION" && "$ACTUAL_APP_VERSION" != "$EXPECTED_APP_VERSION" ]]; then
+    print -u2 "VD_APPLY_FAILED: app version is $ACTUAL_APP_VERSION, expected $EXPECTED_APP_VERSION"
     exit 1
 fi
 
@@ -72,4 +99,4 @@ else
     print "Notarization not present; set REQUIRE_NOTARIZATION=1 for release validation"
 fi
 
-print "Distribution structure, signature, bundle identity, and helper-residue checks passed"
+print "Distribution resources, structure, signature, bundle identity, and helper-residue checks passed"

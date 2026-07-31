@@ -10,6 +10,13 @@ while the HarmonyOS app hardware-decodes the stream and sends touch gestures bac
 > research, personal use, and controlled environments, but OS updates may break compatibility and
 > Apple notarization is not guaranteed for distributions that use private APIs.
 
+## V1.2.2 highlights
+
+- Fixed DMG packaging so the SwiftPM `VirtualDisplayCore` resource bundle ships with the app,
+  preventing a `Bundle.module` startup crash after moving the app away from the build machine.
+- Distribution verification now checks the mounted DMG for the compatibility manifest, its JSON
+  schema, and the expected app version so a local `.build` directory cannot hide a broken artifact.
+
 ## V1.2.1 highlights
 
 - The HarmonyOS parser now shares bounded frame backing instead of copying each payload into a

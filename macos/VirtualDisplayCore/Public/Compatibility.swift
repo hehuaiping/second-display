@@ -77,6 +77,9 @@ public struct MacCompatibilityManifest: Codable, Sendable {
 }
 
 public struct SystemMacCompatibilityChecker: MacCompatibilityChecking {
+    private static let resourceBundleName = "SecondDisplay_VirtualDisplayCore.bundle"
+    private static let manifestName = "CompatibilityManifest.json"
+
     private let manifest: MacCompatibilityManifest
     private let osBuild: String
 
@@ -93,16 +96,40 @@ public struct SystemMacCompatibilityChecker: MacCompatibilityChecking {
     }
 
     public static var bundledManifest: MacCompatibilityManifest {
-        guard
-            let url = Bundle.module.url(
-                forResource: "CompatibilityManifest", withExtension: "json"),
-            let data = try? Data(contentsOf: url),
-            let manifest = try? JSONDecoder().decode(MacCompatibilityManifest.self, from: data),
-            manifest.schemaVersion == 1
-        else {
-            return MacCompatibilityManifest(entries: [])
+        var candidates: [URL] = []
+        if let resourceURL = Bundle.main.resourceURL {
+            candidates.append(resourceURL.appendingPathComponent(resourceBundleName))
         }
-        return manifest
+        candidates.append(Bundle.main.bundleURL.appendingPathComponent(resourceBundleName))
+        candidates.append(
+            Bundle.main.bundleURL
+                .deletingLastPathComponent()
+                .appendingPathComponent(resourceBundleName)
+        )
+        if let executableURL = Bundle.main.executableURL {
+            candidates.append(
+                executableURL
+                    .deletingLastPathComponent()
+                    .appendingPathComponent(resourceBundleName)
+            )
+        }
+        return loadManifest(from: candidates)
+    }
+
+    static func loadManifest(from resourceBundleURLs: [URL]) -> MacCompatibilityManifest {
+        for resourceBundleURL in resourceBundleURLs {
+            let manifestURL = resourceBundleURL.appendingPathComponent(manifestName)
+            guard
+                let data = try? Data(contentsOf: manifestURL),
+                let manifest = try? JSONDecoder().decode(MacCompatibilityManifest.self, from: data),
+                manifest.schemaVersion == 1
+            else {
+                continue
+            }
+            return manifest
+        }
+        // 资源缺失或损坏时保持 unknown build 的实验状态，不允许打包错误让应用启动崩溃。
+        return MacCompatibilityManifest(entries: [])
     }
 
     public static var currentOSBuild: String {

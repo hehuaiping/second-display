@@ -144,6 +144,7 @@ jobs:
           REQUIRE_ADHOC: "1"
           REQUIRE_GATEKEEPER: "0"
           REQUIRE_NOTARIZATION: "0"
+          EXPECTED_APP_VERSION: ${{ needs.validate.outputs.version }}
         run: >
           tools/verify_macos_distribution.sh
           "dist/SecondDisplay-${{ needs.validate.outputs.release_label }}-macos-${{ steps.platform.outputs.architecture }}.dmg"

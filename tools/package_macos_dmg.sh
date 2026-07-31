@@ -4,14 +4,16 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
-APP_VERSION=${APP_VERSION:-1.2.1}
-APP_BUILD_NUMBER=${APP_BUILD_NUMBER:-3}
+APP_VERSION=${APP_VERSION:-1.2.2}
+APP_BUILD_NUMBER=${APP_BUILD_NUMBER:-5}
 RELEASE_LABEL=${RELEASE_LABEL:-$APP_VERSION}
 SIGN_IDENTITY=${MACOS_SIGN_IDENTITY:--}
 INSTALL_LOCAL_PAIRING_IDENTITY=${INSTALL_LOCAL_PAIRING_IDENTITY:-1}
 APP_NAME="Second Display"
 EXECUTABLE_NAME="SecondDisplayMacApp"
 BUNDLE_IDENTIFIER="com.cuihua.cloud.display.macos"
+RESOURCE_BUNDLE_NAME="SecondDisplay_VirtualDisplayCore.bundle"
+RESOURCE_MANIFEST_NAME="CompatibilityManifest.json"
 OUTPUT_DIRECTORY=${OUTPUT_DIRECTORY:-"$WORKSPACE_DIRECTORY/dist"}
 APP_BUNDLE="$OUTPUT_DIRECTORY/$APP_NAME.app"
 ARCHITECTURE=$(uname -m)
@@ -41,9 +43,14 @@ fi
 swift build -c release --product "$EXECUTABLE_NAME"
 SWIFT_BINARY_DIRECTORY=$(swift build -c release --show-bin-path)
 EXECUTABLE_PATH="$SWIFT_BINARY_DIRECTORY/$EXECUTABLE_NAME"
+RESOURCE_BUNDLE_PATH="$SWIFT_BINARY_DIRECTORY/$RESOURCE_BUNDLE_NAME"
 
 if [[ ! -x "$EXECUTABLE_PATH" ]]; then
     print -u2 "CAP_STREAM_STOPPED: release executable was not produced"
+    exit 1
+fi
+if [[ ! -f "$RESOURCE_BUNDLE_PATH/$RESOURCE_MANIFEST_NAME" ]]; then
+    print -u2 "BUILD_OUTPUT_MISSING: VirtualDisplayCore resource bundle was not produced"
     exit 1
 fi
 
@@ -51,6 +58,9 @@ mkdir -p "$OUTPUT_DIRECTORY"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 ditto "$EXECUTABLE_PATH" "$APP_BUNDLE/Contents/MacOS/$EXECUTABLE_NAME"
+# 资源包必须位于标准 macOS Resources 目录并在签名前复制。运行时显式搜索该位置，
+# 不再依赖 SwiftPM 生成访问器中只存在于构建机的绝对 .build 路径。
+ditto "$RESOURCE_BUNDLE_PATH" "$APP_BUNDLE/Contents/Resources/$RESOURCE_BUNDLE_NAME"
 ditto "$WORKSPACE_DIRECTORY/packaging/macos/Info.plist" "$APP_BUNDLE/Contents/Info.plist"
 plutil -replace CFBundleShortVersionString -string "$APP_VERSION" "$APP_BUNDLE/Contents/Info.plist"
 plutil -replace CFBundleVersion -string "$APP_BUILD_NUMBER" "$APP_BUNDLE/Contents/Info.plist"

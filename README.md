@@ -9,6 +9,13 @@ macOS 端创建真正的扩展桌面、采集并硬件编码画面；HarmonyOS �
 > 项目使用 macOS 私有的 `CGVirtualDisplay` 能力。它适合研究、个人使用和受控环境，
 > 但系统升级可能导致兼容性变化，Apple 公证也不保证接受包含私有 API 的发行包。
 
+## V1.2.2 版本重点
+
+- 修复 DMG 漏装 SwiftPM `VirtualDisplayCore` 资源包的问题，避免应用离开构建机后在
+  `Bundle.module` 初始化阶段崩溃。
+- 发行验证现在会从挂载后的 DMG 检查兼容清单资源、JSON schema 和应用版本，防止本机
+  `.build` 目录掩盖不可移植制品。
+
 ## V1.2.1 版本重点
 
 - HarmonyOS 接收端的帧解析改为共享有界 backing，移除解析器到 `VideoFrame` 的整帧
