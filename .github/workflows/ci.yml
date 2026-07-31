@@ -35,7 +35,7 @@ jobs:
       - name: Generate macOS compatibility candidate
         run: python3 tools/macos_compatibility_smoke.py
       - name: Upload compatibility candidate
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: macos-compatibility-${{ runner.os }}
           path: .build/compatibility/*.json
