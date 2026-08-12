@@ -4,7 +4,7 @@ set -euo pipefail
 
 SCRIPT_DIRECTORY=${0:A:h}
 WORKSPACE_DIRECTORY=${SCRIPT_DIRECTORY:h}
-DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.2.2-macos-$(uname -m).dmg"}
+DMG_PATH=${1:-"$WORKSPACE_DIRECTORY/dist/SecondDisplay-1.2.3-macos-$(uname -m).dmg"}
 EXPECTED_BUNDLE_ID="com.cuihua.cloud.display.macos"
 EXPECTED_APP_VERSION=${EXPECTED_APP_VERSION:-}
 RESOURCE_BUNDLE_NAME="SecondDisplay_VirtualDisplayCore.bundle"

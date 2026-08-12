@@ -46,7 +46,7 @@ private struct HostServiceView: View {
                     .font(.system(size: 36))
                     .foregroundStyle(.blue)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text("Second Display Host")
+                    Text("Second Display Mac 服务端")
                         .font(.title2.bold())
                     HStack(spacing: 6) {
                         Circle()
@@ -57,7 +57,7 @@ private struct HostServiceView: View {
                     }
                 }
                 Spacer()
-                Button("Start Service") {
+                Button("启动服务") {
                     Task { await model.startService() }
                 }
                 .keyboardShortcut(.defaultAction)
@@ -66,10 +66,10 @@ private struct HostServiceView: View {
                 )
                 .help(
                     model.screenCaptureAllowed
-                        ? "Start the Second Display service"
-                        : "Grant Screen Recording permission before starting the service"
+                        ? "启动 Second Display 服务"
+                        : "请先授予录屏权限，再启动服务"
                 )
-                Button("Stop Service") {
+                Button("停止服务") {
                     Task { await model.stopService() }
                 }
                 .disabled(!model.isServiceActive)
@@ -81,56 +81,56 @@ private struct HostServiceView: View {
 
             HStack(spacing: 12) {
                 Toggle(
-                    "Adaptive high refresh (experimental)",
+                    "自适应高刷新率（实验性）",
                     isOn: $model.adaptiveHighRefreshEnabled
                 )
                 .toggleStyle(.switch)
                 .disabled(model.isServiceActive)
-                Text("Starts at 60 FPS and promotes only after sustained performance headroom.")
+                Text("默认以 60 FPS 启动，仅在持续具备性能余量后提升刷新率。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
             }
 
             HStack(alignment: .top, spacing: 12) {
-                GroupBox("Network") {
+                GroupBox("网络") {
                     DetailGrid(rows: [
-                        ("Mac IP", model.localIPAddress),
-                        ("Control", "TCP/TLS 52340"),
-                        ("Video", "TCP/TLS 52341"),
+                        ("Mac IP 地址", model.localIPAddress),
+                        ("控制通道", "TCP/TLS 52340"),
+                        ("视频通道", "TCP/TLS 52341"),
                     ])
                 }
-                GroupBox("Connection") {
+                GroupBox("连接") {
                     DetailGrid(rows: [
-                        ("Receiver", model.deviceName),
-                        ("Display ID", model.displayID),
-                        ("Encoded", model.encodedFrames),
-                        ("Dropped", model.droppedFrames),
+                        ("接收设备", model.deviceName),
+                        ("显示器 ID", model.displayID),
+                        ("已编码帧", model.encodedFrames),
+                        ("已丢弃帧", model.droppedFrames),
                     ])
                 }
             }
 
-            GroupBox("Diagnostics") {
+            GroupBox("诊断") {
                 VStack(alignment: .leading, spacing: 10) {
                     DetailGrid(rows: [
-                        ("Capability", model.capabilitySummary),
-                        ("Mode", model.streamMode),
-                        ("Bitrate", model.currentBitrate),
+                        ("系统能力", model.capabilitySummary),
+                        ("传输模式", model.streamMode),
+                        ("码率", model.currentBitrate),
                         ("RTT", model.networkRTT),
-                        ("Video queue", model.videoQueueDepth),
-                        ("Recoveries", model.recoveryCount),
-                        ("Recent error", model.recentErrorCode),
-                        ("Self-test", model.selfTestSummary),
+                        ("视频队列", model.videoQueueDepth),
+                        ("恢复次数", model.recoveryCount),
+                        ("最近错误", model.recentErrorCode),
+                        ("自检结果", model.selfTestSummary),
                     ])
                     HStack {
-                        Button("Run Display Self-Test") {
+                        Button("运行显示器自检") {
                             Task { await model.runDisplaySelfTest() }
                         }
                         .disabled(model.isServiceActive || !model.screenCaptureAllowed)
-                        Button("Export Diagnostics") {
+                        Button("导出诊断信息") {
                             model.exportDiagnostics()
                         }
-                        Button("Copy Error Code") {
+                        Button("复制错误码") {
                             model.copyRecentErrorCode()
                         }
                         .disabled(model.recentErrorCode == "—")
@@ -139,12 +139,12 @@ private struct HostServiceView: View {
                 .padding(.vertical, 4)
             }
 
-            GroupBox("Permissions") {
+            GroupBox("权限") {
                 VStack(spacing: 10) {
                     HStack(spacing: 12) {
                         Label(
                             model.screenCaptureAllowed
-                                ? "Screen Recording allowed" : "Screen Recording permission required",
+                                ? "已授予录屏权限" : "需要录屏权限",
                             systemImage: model.screenCaptureAllowed
                                 ? "checkmark.circle.fill" : "exclamationmark.triangle.fill"
                         )
@@ -158,7 +158,7 @@ private struct HostServiceView: View {
                     HStack(spacing: 12) {
                         Label(
                             model.accessibilityAllowed
-                                ? "Touch control allowed" : "Touch control requires Accessibility",
+                                ? "已允许触控操作" : "触控操作需要辅助功能权限",
                             systemImage: model.accessibilityAllowed
                                 ? "checkmark.circle.fill" : "hand.tap.fill"
                         )
@@ -170,8 +170,8 @@ private struct HostServiceView: View {
                         .disabled(model.accessibilityAllowed)
                     }
                     Text(
-                        "Permission prompts appear only after you click a request button. "
-                            + "Screen Recording is registered with macOS before System Settings opens."
+                        "只有点击权限请求按钮后才会显示系统授权提示。打开系统设置前，"
+                            + "应用会先向 macOS 注册录屏权限请求。"
                     )
                     .font(.caption)
                     .foregroundStyle(.secondary)
@@ -180,20 +180,20 @@ private struct HostServiceView: View {
                 .padding(.vertical, 4)
             }
 
-            GroupBox("Pairing") {
+            GroupBox("配对") {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Label(
-                            model.pairingReady ? "Pairing identity ready" : "Pairing identity missing",
+                            model.pairingReady ? "配对身份已就绪" : "缺少配对身份",
                             systemImage: model.pairingReady
                                 ? "checkmark.shield.fill" : "exclamationmark.triangle.fill"
                         )
                         .foregroundStyle(model.pairingReady ? Color.green : Color.orange)
                         Spacer()
-                        Text("TLS 1.3 · pinned CA")
+                        Text("TLS 1.3 · 已固定 CA")
                             .foregroundStyle(.secondary)
                     }
-                    Text("Certificate SHA-256")
+                    Text("证书 SHA-256 指纹")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Text(model.certificateFingerprint)
@@ -206,18 +206,18 @@ private struct HostServiceView: View {
                                 .resizable()
                                 .frame(width: 128, height: 128)
                                 .background(Color.white)
-                                .accessibilityLabel("Second Display pairing QR code")
+                                .accessibilityLabel("Second Display 配对二维码")
                         }
                         VStack(alignment: .leading, spacing: 6) {
-                            Text("Scan this QR code in the HarmonyOS app")
+                            Text("请使用 HarmonyOS 应用扫描此二维码")
                                 .font(.headline)
-                            Text("Verification code")
+                            Text("验证码")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                             Text(model.pairingVerificationCode)
                                 .font(.system(.title3, design: .monospaced).bold())
                                 .textSelection(.enabled)
-                            Text("Trust is saved only after confirmation on the receiver.")
+                            Text("仅在接收端确认后才会保存信任关系。")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
                         }
@@ -262,9 +262,9 @@ private final class HostServiceModel: ObservableObject {
     static let shared = HostServiceModel()
 
     @Published private(set) var phase: P3HostPhase = .stopped
-    @Published private(set) var statusMessage = "Service is stopped"
-    @Published private(set) var localIPAddress = "Unavailable"
-    @Published private(set) var deviceName = "Waiting for receiver"
+    @Published private(set) var statusMessage = "服务已停止"
+    @Published private(set) var localIPAddress = "不可用"
+    @Published private(set) var deviceName = "等待接收设备连接"
     @Published private(set) var displayID = "—"
     @Published private(set) var encodedFrames = "0"
     @Published private(set) var droppedFrames = "0"
@@ -273,18 +273,18 @@ private final class HostServiceModel: ObservableObject {
     @Published private(set) var accessibilityAllowed = false
     @Published private(set) var screenCaptureRequestIssued = false
     @Published private(set) var accessibilityRequestIssued = false
-    @Published private(set) var certificateFingerprint = "Unavailable"
+    @Published private(set) var certificateFingerprint = "不可用"
     @Published private(set) var pairingLocation = ""
-    @Published private(set) var pairingVerificationCode = "Unavailable"
+    @Published private(set) var pairingVerificationCode = "不可用"
     @Published private(set) var pairingQRCode: NSImage?
-    @Published private(set) var capabilitySummary = "Checking"
+    @Published private(set) var capabilitySummary = "正在检测"
     @Published private(set) var streamMode = "—"
     @Published private(set) var currentBitrate = "—"
     @Published private(set) var networkRTT = "—"
     @Published private(set) var videoQueueDepth = "—"
     @Published private(set) var recoveryCount = "0"
     @Published private(set) var recentErrorCode = "—"
-    @Published private(set) var selfTestSummary = "Not run"
+    @Published private(set) var selfTestSummary = "尚未运行"
     @Published var adaptiveHighRefreshEnabled = false {
         didSet {
             UserDefaults.standard.set(
@@ -310,15 +310,20 @@ private final class HostServiceModel: ObservableObject {
         accessibilityRequestIssued = UserDefaults.standard.bool(
             forKey: Self.accessibilityPromptKey
         )
-        localIPAddress = LocalNetworkInfo.preferredIPv4Address() ?? "Unavailable"
+        localIPAddress = LocalNetworkInfo.preferredIPv4Address() ?? "不可用"
         refreshPermissions()
         reloadPairing()
         let capability = VirtualDisplayCapabilityProbe().report()
         let compatibility = SystemMacCompatibilityChecker().decision()
-        capabilitySummary =
-            capability.supported
-            ? "\(compatibility.status.rawValue.capitalized) · build \(compatibility.osBuild) · probe v\(capability.probeVersion)"
-            : "Unsupported · missing \(capability.missingClasses.count + capability.missingSelectors.count)"
+        let compatibilityLabel: String
+        switch compatibility.status {
+        case .supported: compatibilityLabel = "已支持"
+        case .experimental: compatibilityLabel = "实验性支持"
+        case .blocked: compatibilityLabel = "已阻止"
+        }
+        capabilitySummary = capability.supported
+            ? "\(compatibilityLabel) · 系统构建 \(compatibility.osBuild) · 探测 v\(capability.probeVersion)"
+            : "不支持 · 缺少 \(capability.missingClasses.count + capability.missingSelectors.count) 项能力"
     }
 
     var isServiceActive: Bool {
@@ -332,15 +337,15 @@ private final class HostServiceModel: ObservableObject {
 
     var phaseLabel: String {
         switch phase {
-        case .stopped: "Stopped"
-        case .starting: "Starting"
-        case .listening: "Listening"
-        case .connected: "Receiver connected"
-        case .preparingDisplay: "Preparing display"
-        case .streaming: "Streaming"
-        case .recovering: "Recovering"
-        case .stopping: "Stopping"
-        case .failed: "Failed"
+        case .stopped: "已停止"
+        case .starting: "正在启动"
+        case .listening: "等待连接"
+        case .connected: "接收设备已连接"
+        case .preparingDisplay: "正在准备显示器"
+        case .streaming: "正在传输画面"
+        case .recovering: "正在恢复"
+        case .stopping: "正在停止"
+        case .failed: "启动失败"
         }
     }
 
@@ -354,11 +359,11 @@ private final class HostServiceModel: ObservableObject {
     }
 
     var screenCapturePermissionActionLabel: String {
-        screenCaptureRequestIssued ? "Open System Settings" : "Request Screen Recording"
+        screenCaptureRequestIssued ? "打开系统设置" : "请求录屏权限"
     }
 
     var accessibilityPermissionActionLabel: String {
-        accessibilityRequestIssued ? "Open System Settings" : "Enable Touch Control"
+        accessibilityRequestIssued ? "打开系统设置" : "启用触控操作"
     }
 
     func startService() async {
@@ -368,16 +373,16 @@ private final class HostServiceModel: ObservableObject {
             phase = .failed
             recentErrorCode = SessionErrorCode.capPermissionDenied.rawValue
             statusMessage =
-                "CAP_PERMISSION_DENIED: grant Screen Recording in Permissions before starting"
+                "CAP_PERMISSION_DENIED：请先在权限区域授予录屏权限"
             return
         }
         reloadPairing()
         guard let credentials else {
             phase = .failed
-            statusMessage = "NET_PROTOCOL_MISMATCH: pairing identity is unavailable"
+            statusMessage = "NET_PROTOCOL_MISMATCH：配对身份不可用"
             return
         }
-        deviceName = "Waiting for receiver"
+        deviceName = "等待接收设备连接"
         displayID = "—"
         encodedFrames = "0"
         droppedFrames = "0"
@@ -417,11 +422,11 @@ private final class HostServiceModel: ObservableObject {
         _ = screenCapturePermission.requestFromUserAction()
         refreshPermissions()
         if screenCaptureAllowed {
-            statusMessage = "Screen Recording permission granted"
+            statusMessage = "已授予录屏权限"
         } else {
             recentErrorCode = SessionErrorCode.capPermissionDenied.rawValue
             statusMessage =
-                "CAP_PERMISSION_DENIED: enable Screen Recording in System Settings, then return"
+                "CAP_PERMISSION_DENIED：请在系统设置中允许录屏，然后返回应用"
             openScreenRecordingSettings()
         }
     }
@@ -440,7 +445,7 @@ private final class HostServiceModel: ObservableObject {
         if !accessibilityAllowed {
             recentErrorCode = SessionErrorCode.inputPermissionDenied.rawValue
             statusMessage =
-                "INPUT_PERMISSION_DENIED: enable Accessibility in System Settings for touch control"
+                "INPUT_PERMISSION_DENIED：请在系统设置中允许辅助功能，以启用触控操作"
         }
     }
 
@@ -448,7 +453,7 @@ private final class HostServiceModel: ObservableObject {
         openPrivacySettings(
             anchor: "Privacy_ScreenCapture",
             errorCode: .capPermissionDenied,
-            failureDetail: "unable to open Screen Recording settings"
+            failureDetail: "无法打开录屏权限设置"
         )
     }
 
@@ -456,7 +461,7 @@ private final class HostServiceModel: ObservableObject {
         openPrivacySettings(
             anchor: "Privacy_Accessibility",
             errorCode: .inputPermissionDenied,
-            failureDetail: "unable to open Accessibility settings"
+            failureDetail: "无法打开辅助功能权限设置"
         )
     }
 
@@ -485,26 +490,26 @@ private final class HostServiceModel: ObservableObject {
     func runDisplaySelfTest() async {
         guard !isServiceActive else { return }
         do {
-            statusMessage = "Running create / enumerate / destroy diagnostic"
+            statusMessage = "正在运行创建、枚举和销毁诊断"
             let result = try await P3DiagnosticSelfTest.run()
             latestSelfTest = result
             selfTestSummary = String(
-                format: "Passed · create %.0f ms · enumerate %.0f ms · destroy %.0f ms",
+                format: "通过 · 创建 %.0f ms · 枚举 %.0f ms · 销毁 %.0f ms",
                 result.createMilliseconds,
                 result.enumerationMilliseconds,
                 result.destroyMilliseconds
             )
-            statusMessage = "Virtual display self-test passed"
+            statusMessage = "虚拟显示器自检通过"
         } catch let error as SessionError {
             recentErrorCode = error.code.rawValue
-            selfTestSummary = "Failed · \(error.code.rawValue)"
-            statusMessage = error.errorDescription ?? error.code.rawValue
+            selfTestSummary = "失败 · \(error.code.rawValue)"
+            statusMessage = localizedErrorMessage(error)
         } catch is CancellationError {
-            statusMessage = "Diagnostic self-test cancelled"
+            statusMessage = "诊断自检已取消"
         } catch {
             recentErrorCode = SessionErrorCode.vdApplyFailed.rawValue
-            selfTestSummary = "Failed · \(recentErrorCode)"
-            statusMessage = "VD_APPLY_FAILED: diagnostic self-test failed"
+            selfTestSummary = "失败 · \(recentErrorCode)"
+            statusMessage = "VD_APPLY_FAILED：诊断自检失败"
         }
     }
 
@@ -519,13 +524,13 @@ private final class HostServiceModel: ObservableObject {
             panel.nameFieldStringValue = "SecondDisplay-Diagnostics.json"
             guard panel.runModal() == .OK, let url = panel.url else { return }
             try data.write(to: url, options: .atomic)
-            statusMessage = "Diagnostics exported"
+            statusMessage = "诊断信息已导出"
         } catch let error as SessionError {
             recentErrorCode = error.code.rawValue
-            statusMessage = error.errorDescription ?? error.code.rawValue
+            statusMessage = localizedErrorMessage(error)
         } catch {
             recentErrorCode = SessionErrorCode.netProtocolMismatch.rawValue
-            statusMessage = "NET_PROTOCOL_MISMATCH: unable to export diagnostics"
+            statusMessage = "NET_PROTOCOL_MISMATCH：无法导出诊断信息"
         }
     }
 
@@ -535,13 +540,102 @@ private final class HostServiceModel: ObservableObject {
         NSPasteboard.general.setString(recentErrorCode, forType: .string)
     }
 
+    /// 事件本身保留稳定的英文诊断内容，用户界面只呈现中文状态，避免改变日志和协议语义。
+    private func localizedEventMessage(_ event: P3HostEvent) -> String {
+        if let error = event.error { return localizedErrorMessage(error) }
+        switch event.phase {
+        case .stopped:
+            return "服务已停止"
+        case .starting:
+            return "正在准备安全连接服务"
+        case .listening:
+            return "服务已启动，正在等待 HarmonyOS 设备连接"
+        case .connected:
+            return "HarmonyOS 接收设备已连接"
+        case .preparingDisplay:
+            if let displayID = event.displayID {
+                return "正在准备虚拟显示器 \(displayID)"
+            }
+            return "正在准备虚拟显示器"
+        case .streaming:
+            if event.message.contains("drops C/E/S") {
+                return localizedStreamingMetrics(event.message)
+            }
+            if let width = event.streamWidth, let height = event.streamHeight {
+                return "正在传输 \(width)×\(height) · \(event.framesPerSecond ?? 0) FPS"
+            }
+            return "正在传输画面"
+        case .recovering:
+            return event.message.contains("preserving display")
+                ? "连接已中断，将暂时保留虚拟显示器并尝试恢复"
+                : "会话已中断，正在重建虚拟显示器"
+        case .stopping:
+            return "正在停止服务并释放虚拟显示器"
+        case .failed:
+            return "服务运行失败"
+        }
+    }
+
+    /// 保留运行时诊断中的全部数值，只翻译固定标签。
+    private func localizedStreamingMetrics(_ message: String) -> String {
+        let replacements = [
+            ("Streaming ", "正在传输 "),
+            (" at ", " · "),
+            (" fps · drops C/E/S ", " FPS · 丢帧 采集/编码/发送 "),
+            (" · p95 cap ", " · P95 采集 "),
+            (" q ", " 队列 "),
+            (" pack ", " 封包 "),
+            (" enc ", " 编码 "),
+            (" send ", " 发送 "),
+            (" ms · src ", " ms · 帧率 源 "),
+            ("/cap ", "/采集 "),
+            ("/enc ", "/编码 "),
+            (" · recv ", " · 接收 "),
+            ("/display ", "/显示 "),
+            (" fps decodeP95 ", " FPS · 解码输出 P95 "),
+            (" · dirty ", " · 变化区域 "),
+            (" active ", " 活动 "),
+            (" static ", " 静止 "),
+            (" · HW LL on ", " · 硬件编码 · 低延迟 开启 "),
+            (" · HW LL off ", " · 硬件编码 · 低延迟 关闭 "),
+            (" · SW LL on ", " · 软件编码 · 低延迟 开启 "),
+            (" · SW LL off ", " · 软件编码 · 低延迟 关闭 "),
+            (" · net ", " · 网络 "),
+            (" · E age/q/vt/rec/fail/u ", " · 编码丢弃 年龄/队列/VT/恢复/失败/未知 "),
+        ]
+        return replacements.reduce(message) { result, replacement in
+            result.replacingOccurrences(of: replacement.0, with: replacement.1)
+        }
+    }
+
+    /// 错误码保持不变，便于检索诊断；仅将面向用户的说明转换为中文。
+    private func localizedErrorMessage(_ error: SessionError) -> String {
+        let detail: String
+        switch error.code {
+        case .vdCapabilityMissing: detail = "当前 macOS 缺少所需的虚拟显示器能力"
+        case .vdApplyFailed: detail = "无法创建或配置虚拟显示器"
+        case .vdEnumerationTimeout: detail = "等待虚拟显示器出现超时"
+        case .vdHiDPIModeMissing: detail = "所需的 HiDPI 显示模式不可用"
+        case .vdMirrorDetachFailed: detail = "无法将虚拟显示器切换为扩展模式"
+        case .vdTerminatedBySystem: detail = "虚拟显示器已被系统移除"
+        case .capPermissionDenied: detail = "未获得录屏权限"
+        case .capStreamStopped: detail = "屏幕采集已停止"
+        case .encCreateFailed: detail = "无法启动视频编码器"
+        case .encBackpressure: detail = "视频编码队列出现积压"
+        case .netProtocolMismatch: detail = "连接协议不兼容或配对身份不可用"
+        case .decoderFatal: detail = "接收端视频解码失败"
+        case .inputPermissionDenied: detail = "未获得辅助功能权限"
+        }
+        return "\(error.code.rawValue)：\(detail)"
+    }
+
     private func apply(_ event: P3HostEvent) {
         guard event.generation >= latestGeneration else { return }
         latestGeneration = event.generation
         eventHistory.append(event)
         if eventHistory.count > 200 { eventHistory.removeFirst(eventHistory.count - 200) }
         phase = event.phase
-        statusMessage = event.message
+        statusMessage = localizedEventMessage(event)
         if let value = event.deviceName { deviceName = value }
         if let value = event.displayID { displayID = String(value) }
         if let value = event.encodedFrameCount { encodedFrames = value.formatted() }
@@ -562,7 +656,7 @@ private final class HostServiceModel: ObservableObject {
         if let error = event.error { recentErrorCode = error.code.rawValue }
         if event.phase == .stopped {
             displayID = "—"
-            deviceName = "Waiting for receiver"
+            deviceName = "等待接收设备连接"
         }
         if event.error?.code == .capPermissionDenied {
             refreshPermissions()
@@ -585,16 +679,16 @@ private final class HostServiceModel: ObservableObject {
         } catch let error as SessionError {
             credentials = nil
             pairingReady = false
-            certificateFingerprint = "Unavailable"
-            pairingLocation = error.errorDescription ?? error.code.rawValue
-            pairingVerificationCode = "Unavailable"
+            certificateFingerprint = "不可用"
+            pairingLocation = localizedErrorMessage(error)
+            pairingVerificationCode = "不可用"
             pairingQRCode = nil
         } catch {
             credentials = nil
             pairingReady = false
-            certificateFingerprint = "Unavailable"
-            pairingLocation = "NET_PROTOCOL_MISMATCH: unable to load pairing identity"
-            pairingVerificationCode = "Unavailable"
+            certificateFingerprint = "不可用"
+            pairingLocation = "NET_PROTOCOL_MISMATCH：无法加载配对身份"
+            pairingVerificationCode = "不可用"
             pairingQRCode = nil
         }
     }

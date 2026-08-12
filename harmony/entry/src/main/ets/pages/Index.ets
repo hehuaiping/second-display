@@ -19,6 +19,14 @@ import {
   canPromoteSurfaceReady,
   isConnectionAttemptPending
 } from '../services/ConnectionRecoveryPolicy'
+import {
+  APP_LINK_OPEN_FAILED,
+  canOpenMacServerWebsite,
+  isCurrentExternalLinkOperation,
+  MAC_SERVER_WEBSITE
+} from '../services/ExternalLinkPolicy'
+
+const APP_VERSION: string = '1.2.3'
 
 PersistentStorage.persistProp('secondDisplayDeviceId', '')
 PersistentStorage.persistProp('secondDisplayPrivacyAccepted', false)
@@ -95,6 +103,9 @@ struct Index {
   @State private privacyVisible: boolean = false
   @State private privacyRequired: boolean = false
   @State private privacyActionStatus: string = ''
+  @State private serverGuideVisible: boolean = false
+  @State private websiteOpening: boolean = false
+  @State private websiteActionStatus: string = ''
   private statusTimer: number = -1
   private previousFrameCount: number = 0
   private previousFrameSampleAtMs: number = 0
@@ -123,6 +134,7 @@ struct Index {
   private selectedTarget: DiscoveredSecondDisplayService | undefined = undefined
   private trustGeneration: number = 0
   private pairingOperationGeneration: number = 0
+  private websiteOperationGeneration: number = 0
   private rediscoveryFingerprint: string = ''
   private pageActive: boolean = false
   private releaseServicesStarted: boolean = false
@@ -144,6 +156,9 @@ struct Index {
 
   aboutToDisappear(): void {
     this.pageActive = false
+    this.websiteOperationGeneration += 1
+    this.websiteOpening = false
+    this.serverGuideVisible = false
     this.releaseServicesStarted = false
     if (this.statusTimer >= 0) {
       clearInterval(this.statusTimer)
@@ -215,6 +230,46 @@ struct Index {
     context.terminateSelf().catch((): void => {
       this.privacyActionStatus = 'NET_PROTOCOL_MISMATCH: 退出失败，请从系统任务界面关闭应用'
     })
+  }
+
+  private openMacServerWebsite(): void {
+    if (!canOpenMacServerWebsite(this.privacyAccepted, this.websiteOpening)) return
+    const context = this.getUIContext().getHostContext() as common.UIAbilityContext | undefined
+    if (context === undefined) {
+      this.websiteActionStatus = `${APP_LINK_OPEN_FAILED}：无法获取应用上下文，请在浏览器中访问官网`
+      return
+    }
+
+    this.websiteOpening = true
+    this.websiteActionStatus = ''
+    this.websiteOperationGeneration += 1
+    const activeGeneration: number = this.websiteOperationGeneration
+    try {
+      context.openLink(MAC_SERVER_WEBSITE).then((): void => {
+        if (!isCurrentExternalLinkOperation(
+          activeGeneration,
+          this.websiteOperationGeneration,
+          this.pageActive
+        )) return
+        this.websiteOpening = false
+      }).catch((): void => {
+        if (!isCurrentExternalLinkOperation(
+          activeGeneration,
+          this.websiteOperationGeneration,
+          this.pageActive
+        )) return
+        this.websiteOpening = false
+        this.websiteActionStatus = `${APP_LINK_OPEN_FAILED}：暂时无法打开官网，请在浏览器中访问 ${MAC_SERVER_WEBSITE}`
+      })
+    } catch (error) {
+      if (!isCurrentExternalLinkOperation(
+        activeGeneration,
+        this.websiteOperationGeneration,
+        this.pageActive
+      )) return
+      this.websiteOpening = false
+      this.websiteActionStatus = `${APP_LINK_OPEN_FAILED}：官网地址无效，请在浏览器中访问 ${MAC_SERVER_WEBSITE}`
+    }
   }
 
   private loadTrustedMacs(): void {
@@ -1098,6 +1153,16 @@ struct Index {
               }
               .alignItems(HorizontalAlign.Start)
               .layoutWeight(1)
+              Button('服务端指引')
+                .fontSize(11)
+                .fontColor('#DCEBFA')
+                .height(44)
+                .backgroundColor('#263E5875')
+                .accessibilityText('查看 Mac 服务端安装和启动指引')
+                .onClick(() => {
+                  this.websiteActionStatus = ''
+                  this.serverGuideVisible = true
+                })
             }
             .width('100%')
 
@@ -1391,6 +1456,88 @@ struct Index {
         .border({ width: 1, color: '#304C6A91' })
       }
 
+      if (!this.isStreamReady() && this.serverGuideVisible) {
+        Column() {
+        }
+        .width('100%')
+        .height('100%')
+        .backgroundColor('#A6000000')
+        .onTouch((_event?: TouchEvent) => {
+        })
+
+        Column({ space: 12 }) {
+          Row({ space: 12 }) {
+            Column({ space: 3 }) {
+              Text('安装 Mac 服务端')
+                .fontSize(this.isPortraitWaitingLayout() ? 20 : 18)
+                .fontWeight(FontWeight.Bold)
+                .fontColor(Color.White)
+              Text('完成以下步骤后，本应用会自动发现可用服务')
+                .fontSize(11)
+                .fontColor('#AFC4DC')
+            }
+            .alignItems(HorizontalAlign.Start)
+            .layoutWeight(1)
+            Button('关闭')
+              .fontSize(11)
+              .fontColor('#DCEBFA')
+              .height(44)
+              .backgroundColor('#263E5875')
+              .onClick(() => this.serverGuideVisible = false)
+          }
+          .width('100%')
+
+          Column({ space: 9 }) {
+            Text('1. 前往官网下载并安装 Second Display Mac 版')
+              .fontSize(12)
+              .fontColor('#E7EFF9')
+              .width('100%')
+            Text('2. 启动 Mac 应用并点击“Start Service”')
+              .fontSize(12)
+              .fontColor('#E7EFF9')
+              .width('100%')
+            Text('3. 保持 Mac 和本设备处于同一局域网')
+              .fontSize(12)
+              .fontColor('#E7EFF9')
+              .width('100%')
+          }
+          .alignItems(HorizontalAlign.Start)
+          .width('100%')
+          .padding(12)
+          .backgroundColor('#28162F4A')
+          .borderRadius(12)
+
+          Text(MAC_SERVER_WEBSITE)
+            .fontSize(10)
+            .fontColor('#89A9CA')
+            .width('100%')
+            .textAlign(TextAlign.Center)
+
+          if (this.websiteActionStatus.length > 0) {
+            Text(this.websiteActionStatus)
+              .fontSize(10)
+              .fontColor('#FFB9B9')
+              .width('100%')
+          }
+
+          Button(this.websiteOpening ? '正在打开…' : '前往官网')
+            .fontSize(12)
+            .fontColor(Color.White)
+            .height(44)
+            .width('100%')
+            .backgroundColor(this.websiteOpening ? '#34485F' : '#2F74C9')
+            .enabled(canOpenMacServerWebsite(this.privacyAccepted, this.websiteOpening))
+            .accessibilityText('使用系统浏览器打开 Second Display 官网')
+            .onClick(() => this.openMacServerWebsite())
+        }
+        .alignItems(HorizontalAlign.Center)
+        .width(this.isPortraitWaitingLayout() ? '88%' : '62%')
+        .padding(this.isPortraitWaitingLayout() ? 20 : 18)
+        .backgroundColor('#FA101D31')
+        .borderRadius(18)
+        .border({ width: 1, color: '#405C789A' })
+      }
+
       if (!this.isStreamReady() && this.pendingPairingFingerprint.length === 64) {
         // 配对属于必须完成的短流程，使用独立模态层，避免横屏低高度下操作按钮落到滚动区域外。
         Column() {
@@ -1579,58 +1726,75 @@ struct Index {
             .fontSize(22)
             .fontWeight(FontWeight.Bold)
             .fontColor(Color.White)
-          Text('Second Display · 1.0.1')
+          Text(`Second Display · ${APP_VERSION}`)
             .fontSize(13)
             .fontColor('#BFD2EA')
-          Text('开发者：何怀平')
-            .fontSize(13)
-            .fontColor('#DCE7F5')
-          Text('本应用用于将 HarmonyOS 设备作为 Mac 的局域网扩展屏幕。')
-            .fontSize(13)
-            .fontColor('#E8EEF7')
-            .textAlign(TextAlign.Center)
-          Text('同意后，应用会在本机生成随机设备标识，发现同一局域网内的 Second Display 服务，并在本机保存已配对 Mac 的名称和公开证书指纹。视频、输入和手势数据仅在设备与所选 Mac 之间传输，不上传云端。')
-            .fontSize(12)
-            .fontColor('#C9D5E4')
-            .textAlign(TextAlign.Start)
-          Text('扫码配对会调用系统扫码界面；只有在你主动扫码时，系统才会请求使用相机或相册。移除配对会删除对应信任记录，卸载应用会清除本机应用数据。')
-            .fontSize(12)
-            .fontColor('#C9D5E4')
-            .textAlign(TextAlign.Start)
-          Text('联系方式：可通过华为应用市场开发者联系渠道联系。')
-            .fontSize(11)
-            .fontColor('#AFC4DC')
+
+          // 正文采用方向相关的有界高度，既允许横屏滚动，也不会把按钮推到页面底部。
+          Scroll() {
+            Column() {
+              // 无空行的单一文本连续排版，避免竖屏出现多个割裂的信息块。
+              Text(
+                `开发者：何怀平。本应用用于将 HarmonyOS 设备作为 Mac 的局域网扩展屏幕。同意后，应用会在本机生成随机设备标识，发现同一局域网内的 Second Display 服务，并在本机保存已配对 Mac 的名称和公开证书指纹。视频、输入和手势数据仅在设备与所选 Mac 之间传输，不上传云端。扫码配对会调用系统扫码界面；只有在你主动扫码时，系统才会请求使用相机或相册。移除配对会删除对应信任记录，卸载应用会清除本机应用数据。Mac 服务端需要另行下载安装，官方网址：${MAC_SERVER_WEBSITE}。本应用不会自动访问或下载安装；只有你主动点击服务端指引中的“前往官网”后，才会交由系统浏览器打开，后续网页访问适用官网展示的隐私说明。联系方式：可通过华为应用市场开发者联系渠道联系。`
+              )
+                .fontSize(12)
+                .fontColor('#C9D5E4')
+                .lineHeight(20)
+                .textAlign(TextAlign.Center)
+                .width('100%')
+            }
+            .alignItems(HorizontalAlign.Center)
+            .width('100%')
+          }
+          .height(this.isPortraitWaitingLayout() ? 280 : 150)
+          .width('100%')
+          .scrollBar(BarState.Auto)
+          .edgeEffect(EdgeEffect.None)
+
           if (this.privacyActionStatus.length > 0) {
             Text(this.privacyActionStatus)
               .fontSize(10)
               .fontColor('#FFB9B9')
+              .width('100%')
+              .textAlign(TextAlign.Center)
           }
+
           Row({ space: 12 }) {
             if (this.privacyRequired) {
               Button('同意并继续')
                 .fontSize(12)
                 .fontColor(Color.White)
+                .height(44)
                 .backgroundColor('#3A9D66')
                 .onClick(() => this.acceptPrivacyNotice())
               Button('不同意并退出')
                 .fontSize(12)
                 .fontColor(Color.White)
+                .height(44)
                 .backgroundColor('#73424A')
                 .onClick(() => this.declinePrivacyNotice())
             } else {
               Button('关闭')
                 .fontSize(12)
                 .fontColor(Color.White)
+                .height(44)
                 .backgroundColor('#5B8DEF')
                 .onClick(() => this.privacyVisible = false)
             }
           }
+          .justifyContent(FlexAlign.Center)
+          .width('100%')
         }
         .alignItems(HorizontalAlign.Center)
         .justifyContent(FlexAlign.Center)
         .width('100%')
         .height('100%')
-        .padding({ left: 80, right: 80, top: 24, bottom: 24 })
+        .padding({
+          left: this.isPortraitWaitingLayout() ? 24 : 80,
+          right: this.isPortraitWaitingLayout() ? 24 : 80,
+          top: 24,
+          bottom: 24
+        })
         .backgroundColor('#F21A2230')
       }
     }

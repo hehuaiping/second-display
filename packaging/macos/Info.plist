@@ -3,7 +3,7 @@
 <plist version="1.0">
 <dict>
     <key>CFBundleDevelopmentRegion</key>
-    <string>en</string>
+    <string>zh_CN</string>
     <key>CFBundleDisplayName</key>
     <string>Second Display</string>
     <key>CFBundleExecutable</key>
@@ -19,9 +19,9 @@
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.2.2</string>
+    <string>1.2.3</string>
     <key>CFBundleVersion</key>
-    <string>5</string>
+    <string>6</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.utilities</string>
     <key>LSMinimumSystemVersion</key>
@@ -29,13 +29,13 @@
     <key>NSHighResolutionCapable</key>
     <true/>
     <key>NSLocalNetworkUsageDescription</key>
-    <string>Second Display connects to a paired HarmonyOS receiver on your local network.</string>
+    <string>Second Display 需要通过局域网连接已配对的 HarmonyOS 接收设备。</string>
     <key>NSBonjourServices</key>
     <array>
         <string>_seconddisplay._tcp</string>
     </array>
     <key>NSScreenCaptureUsageDescription</key>
-    <string>Second Display captures only the virtual extended desktop that it creates.</string>
+    <string>Second Display 仅采集由本应用创建的虚拟扩展桌面，用于传输到接收设备。</string>
     <key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
