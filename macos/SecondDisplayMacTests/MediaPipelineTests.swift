@@ -994,7 +994,9 @@ private func makeFrame(
 private func waitForFrameCount(
     _ expectedCount: Int,
     recorder: EncodedFrameRecorder,
-    timeout: Duration = .seconds(2)
+    // GitHub macOS runner 的 VideoToolbox/任务调度偶尔超过 2 秒；这里只扩大测试等待预算，
+    // 帧数量、丢帧分类和关键帧等行为断言保持不变。
+    timeout: Duration = .seconds(5)
 ) async throws {
     let clock = ContinuousClock()
     let deadline = clock.now.advanced(by: timeout)
