@@ -200,6 +200,10 @@ final class P3HostSessionRunner: P3HostSessionRunning, @unchecked Sendable {
                 setRefreshRate(displayCreation.refreshRate, for: hello.deviceId)
             }
             let handle = displayCreation.handle
+            // ScreenCaptureKit must see the virtual display as an independent
+            // display. If macOS created it in a mirror set, detach it and wait
+            // for the 2x mode to settle before starting capture enumeration.
+            try await displayLease.stabilize(handle: handle, generation: generation)
             let createdDisplayObserver = try DisplayReconfigurationObserver(generation: generation)
             displayObserver = createdDisplayObserver
             displayObserverTask = Task {
@@ -1076,6 +1080,7 @@ private actor P3NetworkPathState {
 @MainActor
 private final class P3DisplayLease {
     private let provider = CGVirtualDisplayProvider()
+    private let displayModeMaintainer = DisplayModeMaintainer()
     private var handle: VirtualDisplayHandle?
     private var testPattern: P3AnimatedTestPattern?
     private var activeRefreshRate: Int?
@@ -1084,6 +1089,20 @@ private final class P3DisplayLease {
     private var retentionTask: Task<Void, Never>?
 
     var displayID: UInt32? { handle?.displayID }
+
+    func stabilize(handle: VirtualDisplayHandle, generation: UInt64) async throws {
+        guard self.handle?.displayID == handle.displayID else {
+            throw SessionError(code: .vdApplyFailed, detail: "P3 display lease is not current")
+        }
+        try await displayModeMaintainer.waitUntilStable(
+            displayID: handle.displayID,
+            logicalSize: handle.logicalSize,
+            generation: generation,
+            timeout: .seconds(8),
+            interval: .milliseconds(100),
+            isCurrentGeneration: { $0 == generation }
+        )
+    }
 
     func create(
         framebufferWidth: Int,
