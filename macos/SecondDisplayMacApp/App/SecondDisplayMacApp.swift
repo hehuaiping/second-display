@@ -6,6 +6,7 @@ import CryptoKit
 import Darwin
 import Foundation
 import P3HostCore
+import Security
 import SecondDisplayCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -719,6 +720,7 @@ private struct PairingCredentials {
 
     static func load() throws -> PairingCredentials {
         let directory = try pairingDirectory()
+        try provisionIfMissing(at: directory)
         let identityData: Data
         let passwordData: Data
         let certificateData: Data
@@ -749,6 +751,135 @@ private struct PairingCredentials {
             fingerprint: fingerprint,
             directory: directory
         )
+    }
+
+    /// A release DMG must not contain a shared private key. Create a unique
+    /// identity on the Mac the first time the app is launched instead.
+    private static func provisionIfMissing(at directory: URL) throws {
+        let fileManager = FileManager.default
+        let expectedFiles = ["identity.p12", "password", "cert.pem"]
+        let existingFiles = expectedFiles.filter {
+            fileManager.fileExists(atPath: directory.appending(path: $0).path)
+        }
+        guard existingFiles.isEmpty else {
+            guard existingFiles.count == expectedFiles.count else {
+                throw SessionError(
+                    code: .netProtocolMismatch,
+                    detail: "Pairing directory is incomplete at \(directory.path)"
+                )
+            }
+            return
+        }
+
+        let parent = directory.deletingLastPathComponent()
+        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
+        let temporaryDirectory = parent.appending(
+            path: ".second-display-pairing-\(UUID().uuidString)",
+            directoryHint: .isDirectory
+        )
+        try fileManager.createDirectory(
+            at: temporaryDirectory,
+            withIntermediateDirectories: false,
+            attributes: [.posixPermissions: 0o700]
+        )
+        defer {
+            if fileManager.fileExists(atPath: temporaryDirectory.path) {
+                try? fileManager.removeItem(at: temporaryDirectory)
+            }
+        }
+
+        let password = try makePassword()
+        let passwordURL = temporaryDirectory.appending(path: "password")
+        try Data(password.utf8).write(to: passwordURL, options: .atomic)
+        try fileManager.setAttributes(
+            [.posixPermissions: 0o600],
+            ofItemAtPath: passwordURL.path
+        )
+
+        let keyURL = temporaryDirectory.appending(path: "key.pem")
+        let certificateURL = temporaryDirectory.appending(path: "cert.pem")
+        let identityURL = temporaryDirectory.appending(path: "identity.p12")
+        try runOpenSSL([
+            "req", "-x509", "-newkey", "rsa:3072", "-sha256", "-nodes",
+            "-days", "3650", "-subj", "/CN=Second Display Mac",
+            "-keyout", keyURL.path, "-out", certificateURL.path,
+        ], operation: "Unable to generate TLS certificate")
+        try runOpenSSL([
+            "pkcs12", "-export", "-out", identityURL.path,
+            "-inkey", keyURL.path, "-in", certificateURL.path,
+            "-passout", "file:\(passwordURL.path)",
+        ], operation: "Unable to package TLS identity")
+        // The PKCS#12 bundle is the runtime identity; do not retain a second,
+        // unencrypted private-key copy in Application Support.
+        try fileManager.removeItem(at: keyURL)
+
+        for fileName in ["cert.pem", "identity.p12", "password"] {
+            try fileManager.setAttributes(
+                [.posixPermissions: 0o600],
+                ofItemAtPath: temporaryDirectory.appending(path: fileName).path
+            )
+        }
+
+        if fileManager.fileExists(atPath: directory.path) {
+            let contents = try fileManager.contentsOfDirectory(
+                at: directory,
+                includingPropertiesForKeys: nil
+            )
+            guard contents.isEmpty else {
+                throw SessionError(
+                    code: .netProtocolMismatch,
+                    detail: "Pairing directory contains unexpected files at \(directory.path)"
+                )
+            }
+            try fileManager.removeItem(at: directory)
+        }
+        try fileManager.moveItem(at: temporaryDirectory, to: directory)
+    }
+
+    private static func makePassword() throws -> String {
+        var bytes = [UInt8](repeating: 0, count: 24)
+        let status = bytes.withUnsafeMutableBytes { buffer in
+            guard let baseAddress = buffer.baseAddress else { return errSecParam }
+            return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
+        }
+        guard status == errSecSuccess else {
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "Unable to generate a secure TLS password"
+            )
+        }
+        return bytes.map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func runOpenSSL(_ arguments: [String], operation: String) throws {
+        let candidates = [
+            "/usr/bin/openssl",
+            "/opt/homebrew/bin/openssl",
+            "/usr/local/bin/openssl",
+        ]
+        guard let executablePath = candidates.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0)
+        }) else {
+            throw SessionError(
+                code: .netProtocolMismatch,
+                detail: "OpenSSL is unavailable; install it before starting the service"
+            )
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: executablePath)
+        process.arguments = arguments
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        do {
+            try process.run()
+            process.waitUntilExit()
+        } catch {
+            throw SessionError(code: .netProtocolMismatch, detail: operation)
+        }
+        guard process.terminationStatus == 0 else {
+            throw SessionError(code: .netProtocolMismatch, detail: operation)
+        }
     }
 
     private static func pairingDirectory() throws -> URL {
