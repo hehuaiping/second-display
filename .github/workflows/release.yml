@@ -183,7 +183,7 @@ jobs:
             shasum -a 256 SecondDisplay-*.dmg > SHA256SUMS-macos.txt
           )
       - name: Attest DMG provenance
-        uses: actions/attest@v4
+        uses: actions/attest@v4.2.0
         with:
           subject-path: release-assets/*.dmg
       - name: Upload macOS release assets
