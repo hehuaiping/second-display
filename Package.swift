@@ -69,7 +69,10 @@ let package = Package(
                 "TransportCore",
             ],
             path: "macos/P3HostCore",
-            linkerSettings: [.linkedFramework("AppKit")]
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("Security"),
+            ]
         ),
         .target(
             name: "PrivateAPIShim",

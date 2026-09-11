@@ -2,11 +2,9 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import CoreImage.CIFilterBuiltins
-import CryptoKit
 import Darwin
 import Foundation
 import P3HostCore
-import Security
 import SecondDisplayCore
 import SwiftUI
 import UniformTypeIdentifiers
@@ -28,6 +26,7 @@ struct SecondDisplayMacApp: App {
 @MainActor
 private final class SecondDisplayAppDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        HostServiceModel.shared.cancelPairingInitialization()
         guard HostServiceModel.shared.isServiceActive else { return .terminateNow }
         Task {
             await HostServiceModel.shared.stopService()
@@ -185,12 +184,25 @@ private struct HostServiceView: View {
                 VStack(alignment: .leading, spacing: 8) {
                     HStack {
                         Label(
-                            model.pairingReady ? "配对身份已就绪" : "缺少配对身份",
-                            systemImage: model.pairingReady
-                                ? "checkmark.shield.fill" : "exclamationmark.triangle.fill"
+                            model.pairingStatusLabel,
+                            systemImage: model.pairingStatusIcon
                         )
                         .foregroundStyle(model.pairingReady ? Color.green : Color.orange)
                         Spacer()
+                        if model.pairingInitializing {
+                            ProgressView()
+                                .controlSize(.small)
+                        } else if !model.pairingReady {
+                            Button("重试") {
+                                model.retryPairingIdentity()
+                            }
+                            if model.pairingRecoveryAvailable {
+                                Button("重置身份") {
+                                    model.pairingResetConfirmationPresented = true
+                                }
+                                .disabled(model.isServiceActive)
+                            }
+                        }
                         Text("TLS 1.3 · 已固定 CA")
                             .foregroundStyle(.secondary)
                     }
@@ -236,6 +248,14 @@ private struct HostServiceView: View {
         .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) {
             _ in model.refreshPermissions()
         }
+        .alert("重置配对身份？", isPresented: $model.pairingResetConfirmationPresented) {
+            Button("取消", role: .cancel) {}
+            Button("重置并重新生成", role: .destructive) {
+                model.resetPairingIdentity()
+            }
+        } message: {
+            Text("旧证书将失效，所有已经配对的 HarmonyOS 设备都需要重新配对。")
+        }
     }
 }
 
@@ -270,6 +290,9 @@ private final class HostServiceModel: ObservableObject {
     @Published private(set) var encodedFrames = "0"
     @Published private(set) var droppedFrames = "0"
     @Published private(set) var pairingReady = false
+    @Published private(set) var pairingInitializing = true
+    @Published private(set) var pairingRecoveryAvailable = false
+    @Published var pairingResetConfirmationPresented = false
     @Published private(set) var screenCaptureAllowed = false
     @Published private(set) var accessibilityAllowed = false
     @Published private(set) var screenCaptureRequestIssued = false
@@ -297,7 +320,10 @@ private final class HostServiceModel: ObservableObject {
 
     private let service = P3HostService()
     private let screenCapturePermission = ScreenCapturePermissionController()
-    private var credentials: PairingCredentials?
+    private let pairingStore: PairingIdentityStore? = try? PairingIdentityStore.applicationDefault()
+    private var credentials: PairingIdentityCredentials?
+    private var pairingTask: Task<Void, Never>?
+    private var pairingGeneration: UInt64 = 0
     private var latestGeneration: UInt64 = 0
     private var eventHistory: [P3HostEvent] = []
     private var latestSelfTest: P3DiagnosticSelfTestResult?
@@ -313,7 +339,7 @@ private final class HostServiceModel: ObservableObject {
         )
         localIPAddress = LocalNetworkInfo.preferredIPv4Address() ?? "不可用"
         refreshPermissions()
-        reloadPairing()
+        schedulePairingReload()
         let capability = VirtualDisplayCapabilityProbe().report()
         let compatibility = SystemMacCompatibilityChecker().decision()
         let compatibilityLabel: String
@@ -322,7 +348,8 @@ private final class HostServiceModel: ObservableObject {
         case .experimental: compatibilityLabel = "实验性支持"
         case .blocked: compatibilityLabel = "已阻止"
         }
-        capabilitySummary = capability.supported
+        capabilitySummary =
+            capability.supported
             ? "\(compatibilityLabel) · 系统构建 \(compatibility.osBuild) · 探测 v\(capability.probeVersion)"
             : "不支持 · 缺少 \(capability.missingClasses.count + capability.missingSelectors.count) 项能力"
     }
@@ -334,6 +361,16 @@ private final class HostServiceModel: ObservableObject {
         case .stopped, .failed:
             return false
         }
+    }
+
+    var pairingStatusLabel: String {
+        if pairingInitializing { return "正在初始化配对身份" }
+        return pairingReady ? "配对身份已就绪" : "配对身份不可用"
+    }
+
+    var pairingStatusIcon: String {
+        if pairingInitializing { return "hourglass.circle.fill" }
+        return pairingReady ? "checkmark.shield.fill" : "exclamationmark.triangle.fill"
     }
 
     var phaseLabel: String {
@@ -377,7 +414,6 @@ private final class HostServiceModel: ObservableObject {
                 "CAP_PERMISSION_DENIED：请先在权限区域授予录屏权限"
             return
         }
-        reloadPairing()
         guard let credentials else {
             phase = .failed
             statusMessage = "NET_PROTOCOL_MISMATCH：配对身份不可用"
@@ -664,13 +700,82 @@ private final class HostServiceModel: ObservableObject {
         }
     }
 
-    private func reloadPairing() {
+    func retryPairingIdentity() {
+        guard !isServiceActive else { return }
+        schedulePairingReload()
+    }
+
+    func resetPairingIdentity() {
+        guard !isServiceActive else { return }
+        pairingResetConfirmationPresented = false
+        schedulePairingReload(resetsExistingIdentity: true)
+    }
+
+    func cancelPairingInitialization() {
+        pairingTask?.cancel()
+        pairingTask = nil
+        pairingGeneration &+= 1
+        guard let pairingStore else { return }
+        Task { await pairingStore.cancel() }
+    }
+
+    private func schedulePairingReload(resetsExistingIdentity: Bool = false) {
+        pairingTask?.cancel()
+        pairingGeneration &+= 1
+        let generation = pairingGeneration
+        pairingInitializing = true
+        pairingReady = false
+        pairingRecoveryAvailable = false
+        credentials = nil
+        certificateFingerprint = "不可用"
+        pairingVerificationCode = "不可用"
+        pairingQRCode = nil
+        pairingLocation =
+            resetsExistingIdentity
+            ? "正在安全重置并重新生成本机身份…"
+            : "正在安全初始化本机身份…"
+        guard let pairingStore else {
+            pairingInitializing = false
+            pairingLocation = "NET_PROTOCOL_MISMATCH：无法访问应用支持目录"
+            return
+        }
+        pairingTask = Task { [weak self] in
+            do {
+                let loaded =
+                    if resetsExistingIdentity {
+                        try await pairingStore.resetAndCreate(generation: generation)
+                    } else {
+                        try await pairingStore.loadOrCreate(generation: generation)
+                    }
+                try Task.checkCancellation()
+                guard let self, self.pairingGeneration == generation else { return }
+                self.applyPairingCredentials(loaded)
+            } catch is CancellationError {
+                return
+            } catch let error as SessionError {
+                guard let self, self.pairingGeneration == generation else { return }
+                self.applyPairingFailure(error)
+            } catch {
+                guard let self, self.pairingGeneration == generation else { return }
+                self.applyPairingFailure(
+                    SessionError(
+                        code: .netProtocolMismatch,
+                        detail: "Unable to initialize pairing identity"
+                    )
+                )
+            }
+        }
+    }
+
+    private func applyPairingCredentials(_ loaded: PairingIdentityCredentials) {
+        pairingTask = nil
+        pairingInitializing = false
+        pairingRecoveryAvailable = false
+        credentials = loaded
+        pairingReady = true
+        certificateFingerprint = loaded.fingerprint
+        pairingLocation = loaded.directory.path
         do {
-            let loaded = try PairingCredentials.load()
-            credentials = loaded
-            pairingReady = true
-            certificateFingerprint = loaded.fingerprint
-            pairingLocation = loaded.directory.path
             let presentation = try P3PairingPresentation(
                 fingerprint: loaded.fingerprint,
                 name: Host.current().localizedName ?? "Second Display Mac"
@@ -678,20 +783,27 @@ private final class HostServiceModel: ObservableObject {
             pairingVerificationCode = presentation.verificationCode
             pairingQRCode = try makePairingQRCode(payload: presentation.encodedJSON())
         } catch let error as SessionError {
-            credentials = nil
-            pairingReady = false
-            certificateFingerprint = "不可用"
-            pairingLocation = localizedErrorMessage(error)
-            pairingVerificationCode = "不可用"
-            pairingQRCode = nil
+            applyPairingFailure(error)
         } catch {
-            credentials = nil
-            pairingReady = false
-            certificateFingerprint = "不可用"
-            pairingLocation = "NET_PROTOCOL_MISMATCH：无法加载配对身份"
-            pairingVerificationCode = "不可用"
-            pairingQRCode = nil
+            applyPairingFailure(
+                SessionError(code: .netProtocolMismatch, detail: "Unable to render pairing code")
+            )
         }
+    }
+
+    private func applyPairingFailure(_ error: SessionError) {
+        pairingTask = nil
+        pairingInitializing = false
+        pairingRecoveryAvailable = PairingIdentityStore.requiresExplicitReset(error)
+        credentials = nil
+        pairingReady = false
+        certificateFingerprint = "不可用"
+        pairingLocation =
+            pairingRecoveryAvailable
+            ? "NET_PROTOCOL_MISMATCH：配对身份不完整或损坏，请重置后重新配对"
+            : localizedErrorMessage(error)
+        pairingVerificationCode = "不可用"
+        pairingQRCode = nil
     }
 
     private func makePairingQRCode(payload: String) throws -> NSImage {
@@ -709,216 +821,6 @@ private final class HostServiceModel: ObservableObject {
         let image = NSImage(size: representation.size)
         image.addRepresentation(representation)
         return image
-    }
-}
-
-private struct PairingCredentials {
-    let identityData: Data
-    let password: String
-    let fingerprint: String
-    let directory: URL
-
-    static func load() throws -> PairingCredentials {
-        let directory = try pairingDirectory()
-        try provisionIfMissing(at: directory)
-        let identityData: Data
-        let passwordData: Data
-        let certificateData: Data
-        do {
-            identityData = try Data(contentsOf: directory.appending(path: "identity.p12"))
-            passwordData = try Data(contentsOf: directory.appending(path: "password"))
-            certificateData = try Data(contentsOf: directory.appending(path: "cert.pem"))
-        } catch {
-            throw SessionError(
-                code: .netProtocolMismatch,
-                detail: "Pairing files are missing at \(directory.path)"
-            )
-        }
-        guard
-            let password = String(data: passwordData, encoding: .utf8)?
-                .trimmingCharacters(in: .whitespacesAndNewlines),
-            !password.isEmpty,
-            let certificatePEM = String(data: certificateData, encoding: .utf8),
-            let certificateDER = decodeCertificatePEM(certificatePEM)
-        else {
-            throw SessionError(code: .netProtocolMismatch, detail: "Pairing files are invalid")
-        }
-        let digest = SHA256.hash(data: certificateDER)
-        let fingerprint = digest.map { String(format: "%02X", $0) }.joined(separator: ":")
-        return PairingCredentials(
-            identityData: identityData,
-            password: password,
-            fingerprint: fingerprint,
-            directory: directory
-        )
-    }
-
-    /// A release DMG must not contain a shared private key. Create a unique
-    /// identity on the Mac the first time the app is launched instead.
-    private static func provisionIfMissing(at directory: URL) throws {
-        let fileManager = FileManager.default
-        let expectedFiles = ["identity.p12", "password", "cert.pem"]
-        let existingFiles = expectedFiles.filter {
-            fileManager.fileExists(atPath: directory.appending(path: $0).path)
-        }
-        guard existingFiles.isEmpty else {
-            guard existingFiles.count == expectedFiles.count else {
-                throw SessionError(
-                    code: .netProtocolMismatch,
-                    detail: "Pairing directory is incomplete at \(directory.path)"
-                )
-            }
-            return
-        }
-
-        let parent = directory.deletingLastPathComponent()
-        try fileManager.createDirectory(at: parent, withIntermediateDirectories: true)
-        let temporaryDirectory = parent.appending(
-            path: ".second-display-pairing-\(UUID().uuidString)",
-            directoryHint: .isDirectory
-        )
-        try fileManager.createDirectory(
-            at: temporaryDirectory,
-            withIntermediateDirectories: false,
-            attributes: [.posixPermissions: 0o700]
-        )
-        defer {
-            if fileManager.fileExists(atPath: temporaryDirectory.path) {
-                try? fileManager.removeItem(at: temporaryDirectory)
-            }
-        }
-
-        let password = try makePassword()
-        let passwordURL = temporaryDirectory.appending(path: "password")
-        try Data(password.utf8).write(to: passwordURL, options: .atomic)
-        try fileManager.setAttributes(
-            [.posixPermissions: 0o600],
-            ofItemAtPath: passwordURL.path
-        )
-
-        let keyURL = temporaryDirectory.appending(path: "key.pem")
-        let certificateURL = temporaryDirectory.appending(path: "cert.pem")
-        let identityURL = temporaryDirectory.appending(path: "identity.p12")
-        try runOpenSSL([
-            "req", "-x509", "-newkey", "rsa:3072", "-sha256", "-nodes",
-            "-days", "3650", "-subj", "/CN=Second Display Mac",
-            "-keyout", keyURL.path, "-out", certificateURL.path,
-        ], operation: "Unable to generate TLS certificate")
-        try runOpenSSL([
-            "pkcs12", "-export", "-out", identityURL.path,
-            "-inkey", keyURL.path, "-in", certificateURL.path,
-            "-passout", "file:\(passwordURL.path)",
-        ], operation: "Unable to package TLS identity")
-        // The PKCS#12 bundle is the runtime identity; do not retain a second,
-        // unencrypted private-key copy in Application Support.
-        try fileManager.removeItem(at: keyURL)
-
-        for fileName in ["cert.pem", "identity.p12", "password"] {
-            try fileManager.setAttributes(
-                [.posixPermissions: 0o600],
-                ofItemAtPath: temporaryDirectory.appending(path: fileName).path
-            )
-        }
-
-        if fileManager.fileExists(atPath: directory.path) {
-            let contents = try fileManager.contentsOfDirectory(
-                at: directory,
-                includingPropertiesForKeys: nil
-            )
-            guard contents.isEmpty else {
-                throw SessionError(
-                    code: .netProtocolMismatch,
-                    detail: "Pairing directory contains unexpected files at \(directory.path)"
-                )
-            }
-            try fileManager.removeItem(at: directory)
-        }
-        try fileManager.moveItem(at: temporaryDirectory, to: directory)
-    }
-
-    private static func makePassword() throws -> String {
-        var bytes = [UInt8](repeating: 0, count: 24)
-        let status = bytes.withUnsafeMutableBytes { buffer in
-            guard let baseAddress = buffer.baseAddress else { return errSecParam }
-            return SecRandomCopyBytes(kSecRandomDefault, buffer.count, baseAddress)
-        }
-        guard status == errSecSuccess else {
-            throw SessionError(
-                code: .netProtocolMismatch,
-                detail: "Unable to generate a secure TLS password"
-            )
-        }
-        return bytes.map { String(format: "%02x", $0) }.joined()
-    }
-
-    private static func runOpenSSL(_ arguments: [String], operation: String) throws {
-        let candidates = [
-            "/usr/bin/openssl",
-            "/opt/homebrew/bin/openssl",
-            "/usr/local/bin/openssl",
-        ]
-        guard let executablePath = candidates.first(where: {
-            FileManager.default.isExecutableFile(atPath: $0)
-        }) else {
-            throw SessionError(
-                code: .netProtocolMismatch,
-                detail: "OpenSSL is unavailable; install it before starting the service"
-            )
-        }
-
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: executablePath)
-        process.arguments = arguments
-        process.standardOutput = FileHandle.nullDevice
-        process.standardError = FileHandle.nullDevice
-        do {
-            try process.run()
-            process.waitUntilExit()
-        } catch {
-            throw SessionError(code: .netProtocolMismatch, detail: operation)
-        }
-        guard process.terminationStatus == 0 else {
-            throw SessionError(code: .netProtocolMismatch, detail: operation)
-        }
-    }
-
-    private static func pairingDirectory() throws -> URL {
-        if let configured = ProcessInfo.processInfo.environment["P3_POC_TLS_DIRECTORY"],
-            !configured.isEmpty
-        {
-            return URL(fileURLWithPath: configured, isDirectory: true)
-        }
-        guard
-            let applicationSupport = FileManager.default.urls(
-                for: .applicationSupportDirectory,
-                in: .userDomainMask
-            ).first
-        else {
-            throw SessionError(
-                code: .netProtocolMismatch,
-                detail: "Application Support directory is unavailable"
-            )
-        }
-        let installed =
-            applicationSupport
-            .appending(path: "Second Display", directoryHint: .isDirectory)
-            .appending(path: "Pairing", directoryHint: .isDirectory)
-        if FileManager.default.fileExists(atPath: installed.path) { return installed }
-
-        let development = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-            .appending(path: ".build/p3-poc-tls", directoryHint: .isDirectory)
-        if FileManager.default.fileExists(atPath: development.path) { return development }
-        return installed
-    }
-
-    private static func decodeCertificatePEM(_ value: String) -> Data? {
-        let base64 =
-            value
-            .replacingOccurrences(of: "-----BEGIN CERTIFICATE-----", with: "")
-            .replacingOccurrences(of: "-----END CERTIFICATE-----", with: "")
-            .components(separatedBy: .whitespacesAndNewlines)
-            .joined()
-        return Data(base64Encoded: base64)
     }
 }
 

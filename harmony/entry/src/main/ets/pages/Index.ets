@@ -26,7 +26,7 @@ import {
   MAC_SERVER_WEBSITE
 } from '../services/ExternalLinkPolicy'
 
-const APP_VERSION: string = '1.2.3'
+const APP_VERSION: string = '1.3.0'
 
 PersistentStorage.persistProp('secondDisplayDeviceId', '')
 PersistentStorage.persistProp('secondDisplayPrivacyAccepted', false)
