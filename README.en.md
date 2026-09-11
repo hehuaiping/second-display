@@ -10,6 +10,16 @@ while the HarmonyOS app hardware-decodes the stream and sends touch gestures bac
 > research, personal use, and controlled environments, but OS updates may break compatibility and
 > Apple notarization is not guaranteed for distributions that use private APIs.
 
+## V1.3.0 highlights
+
+- First launch now creates a unique TLS pairing identity through a cancellable, generation-scoped
+  asynchronous task. The PKCS#12 password is stored in Keychain, with validated legacy password
+  files migrated and removed automatically.
+- Identity generation now has a 15-second timeout, atomic publication, and temporary-secret
+  cleanup. Incomplete or damaged identities require an explicit reset and re-pairing confirmation.
+- The host detaches a newly created virtual display from any mirror set and waits for its mode to
+  stabilize before ScreenCaptureKit enumeration, reducing mirrored or blank first frames.
+
 ## V1.2.2 highlights
 
 - Fixed DMG packaging so the SwiftPM `VirtualDisplayCore` resource bundle ships with the app,
