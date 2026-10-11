@@ -32,7 +32,7 @@ jobs:
       prerelease: ${{ steps.metadata.outputs.prerelease }}
       harmony_version_code: ${{ steps.metadata.outputs.harmony_version_code }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           fetch-depth: 0
           ref: ${{ inputs.tag || github.ref }}
@@ -77,7 +77,7 @@ jobs:
     needs: validate
     runs-on: macos-15
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
       - name: Validate shared vectors
@@ -101,7 +101,7 @@ jobs:
     needs: validate
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
       - name: Configure protocol tests
@@ -125,7 +125,7 @@ jobs:
       id-token: write
       attestations: write
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
       - name: Detect package architecture
@@ -199,7 +199,7 @@ jobs:
     needs: [validate, macos-quality, harmony-quality]
     runs-on: [self-hosted, harmonyos-build]
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.validate.outputs.commit }}
       - name: Prepare unsigned build configuration
